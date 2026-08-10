@@ -199,16 +199,18 @@ On startup it asks which branch you want:
 | 2 | `asahi` | The main Asahi branch, and what Fedora Asahi Remix builds its kernel from. Same base, without the USB-C alt mode work. |
 | 3 | `asahi-wip` | Asahi's development branch. Closer to upstream, less tested, no USB-C alt mode. |
 
-The menu prints the kernel version each branch is on, read live from the branch tips at the moment you run it:
+The menu prints the kernel version each branch is on and how recently it was updated, read live from the branch tips at the moment you run it:
 
 ```
   1) fairydust   The main Asahi base plus experimental USB-C
                  DisplayPort alt mode, so external displays over
                  USB-C work.
-                 Linux 7.1.6
+                 Linux 7.1.6 - updated 4 days ago (most recent)
 ```
 
-Those numbers are not hard-coded, because they go stale: all three branches sat on 7.0.13 until upstream rebased them onto 7.1.5 in late July 2026, and onto 7.1.6 after that. The version comes from each branch's `Makefile` on `raw.githubusercontent.com` — three small HTTP requests issued in parallel, capped at six seconds, never a clone. If the lookup cannot answer, the menu prints without versions and the build carries on; `SKIP_VERSION_LOOKUP=1` skips it outright, and a `REPO_URL` that is not a GitHub URL is never looked up at all.
+Those numbers are not hard-coded, because they go stale: all three branches sat on 7.0.13 until upstream rebased them onto 7.1.5 in late July 2026, and onto 7.1.6 after that. The version comes from each branch's `Makefile` on `raw.githubusercontent.com`, and the age from the committer date of each branch tip on the GitHub API — small HTTP requests issued in parallel, capped at six seconds, never a clone. If the lookup cannot answer, the menu prints without versions and the build carries on; `SKIP_VERSION_LOOKUP=1` skips it outright, and a `REPO_URL` that is not a GitHub URL is never looked up at all.
+
+`(most recent)` marks the branch carrying the newest commit, and marks more than one where they share a tip, which `asahi` and `asahi-wip` often do. The age is the committer date rather than the author date, so a rebase reads as the recent event it is instead of reporting the branch as months old.
 
 If the branches are no longer on the same version, the menu says so, because that is when the BORE patch stops applying to all of them.
 

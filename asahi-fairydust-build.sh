@@ -278,36 +278,251 @@ rust-src. Install it from your distro (dnf install rust-src) and re-run."
     info "  bindgen: $(bindgen --version)"
 }
 
+# --- Turn a kernel Makefile on stdin into "7.1.6" ---
+#
+# Prints nothing if the input is not a kernel Makefile, so callers can test for
+# an empty string instead of getting a bare "..".
+parse_makefile_version() {
+    awk -F' *= *' '
+        $1 == "VERSION"      { v = $2 }
+        $1 == "PATCHLEVEL"   { p = $2 }
+        $1 == "SUBLEVEL"     { s = $2 }
+        $1 == "EXTRAVERSION" { e = $2 }
+        END { if (v != "") print v "." p "." s e }
+    '
+}
+
+# --- owner/repo for a git remote URL, or failure ---
+#
+# Handles the https and ssh spellings of a GitHub URL. Anything else (a local
+# path, a mirror, gitlab) fails, and callers fall back to printing no version
+# rather than guessing a URL scheme that does not exist.
+github_repo_path() {
+    local url="$1" path
+    case "$url" in
+        https://github.com/*)   path="${url#https://github.com/}" ;;
+        http://github.com/*)    path="${url#http://github.com/}" ;;
+        ssh://git@github.com/*) path="${url#ssh://git@github.com/}" ;;
+        git@github.com:*)       path="${url#git@github.com:}" ;;
+        *) return 1 ;;
+    esac
+    path="${path%.git}"
+    path="${path%/}"
+    [[ -n "$path" ]] || return 1
+    printf '%s' "$path"
+}
+
+# Where a branch's file contents live ...
+github_raw_base() {
+    local path
+    path="$(github_repo_path "$1")" || return 1
+    printf 'https://raw.githubusercontent.com/%s' "$path"
+}
+
+# ... and where its commit metadata lives. Raw file serving carries no dates,
+# so the "last updated" column needs the API instead.
+github_api_base() {
+    local path
+    path="$(github_repo_path "$1")" || return 1
+    printf 'https://api.github.com/repos/%s' "$path"
+}
+
+# --- Commit date of a branch tip, out of the GitHub commits API ---
+#
+# Reads the second "date" in the response, which is the committer date of the
+# newest commit. Author date comes first and is the wrong one here: a rebase
+# preserves it, so it would report these branches as older than they are.
+#
+# per_page=1 keeps the response to a single commit object, which is what makes
+# "the second date" a fixed position rather than a guess. No jq: this script
+# does not otherwise need it, and one field is not worth a dependency.
+parse_commit_date() {
+    grep -o '"date"[[:space:]]*:[[:space:]]*"[^"]*"' \
+        | sed -n '2s/.*"\([^"]*\)"$/\1/p'
+}
+
+# "3 days ago" from a count of seconds. Whole units only: the menu wants
+# freshness at a glance, not a precise duration. A negative count (a skewed
+# clock, a commit dated in the future) falls into the first branch and reads
+# as recent, which is the harmless way to be wrong here.
+relative_age() {
+    local secs="$1" n unit
+    if   (( secs < 3600 ));   then printf 'less than an hour ago'; return
+    elif (( secs < 86400 ));  then n=$(( secs / 3600 ));   unit="hour"
+    elif (( secs < 604800 )); then n=$(( secs / 86400 ));  unit="day"
+    else                           n=$(( secs / 604800 )); unit="week"
+    fi
+    if (( n == 1 )); then
+        printf '1 %s ago' "$unit"
+    else
+        printf '%d %ss ago' "$n" "$unit"
+    fi
+}
+
+# --- Kernel version of each branch, without cloning any of them ---
+#
+# The menu used to hard-code "Currently Linux 7.1.5", which goes stale the
+# moment Asahi rebases these branches, and they rebase often. Git has no way to
+# read one file out of a remote repository over HTTPS: ls-remote returns commit
+# ids only, and GitHub does not serve git archive --remote. So read the
+# branch's Makefile from raw.githubusercontent instead, which is one small HTTP
+# request per branch rather than a 2 GB clone.
+#
+# Results land in BRANCH_VERSIONS. A branch with no entry simply prints without
+# a version: this is a nicety in a menu, and must never be what stops a build.
+#
+#   SKIP_VERSION_LOOKUP=1   do not go to the network at all
+declare -A BRANCH_VERSIONS=()
+declare -A BRANCH_UPDATED=()   # branch -> unix time of its tip commit
+BRANCH_NEWEST=""               # space-padded list of the freshest branches
+BRANCH_VERSION_LOOKUP=""       # "tried" or "skipped", so the menu can say which
+
+prefetch_branch_versions() {
+    local base api tmp b iso epoch newest="" pids=()
+
+    BRANCH_VERSIONS=()
+    BRANCH_UPDATED=()
+    BRANCH_NEWEST=""
+    BRANCH_VERSION_LOOKUP="skipped"
+    [[ "${SKIP_VERSION_LOOKUP:-0}" == "1" ]] && return 0
+    command -v curl >/dev/null 2>&1 || return 0
+    base="$(github_raw_base "$REPO_URL")" || return 0
+    api="$(github_api_base "$REPO_URL")" || return 0
+    tmp="$(mktemp -d)" || return 0
+    BRANCH_VERSION_LOOKUP="tried"
+
+    # All lookups at once, so a dead network costs one timeout and not one per
+    # branch. --max-time is what keeps that promise; without it a black-holed
+    # connection hangs the menu until the TCP stack gives up.
+    for b in "$@"; do
+        ( curl -fsSL --max-time 6 "$base/$b/Makefile" 2>/dev/null \
+            | parse_makefile_version > "$tmp/$b.version" ) &
+        pids+=("$!")
+        # The API is rate limited to 60 requests an hour for an unauthenticated
+        # caller. Three per run is nowhere near that, and a run that does hit it
+        # simply loses the dates: the 403 fails the curl and nothing is written.
+        ( curl -fsSL --max-time 6 "$api/commits?sha=$b&per_page=1" 2>/dev/null \
+            | parse_commit_date > "$tmp/$b.date" ) &
+        pids+=("$!")
+    done
+    wait "${pids[@]}" 2>/dev/null || true
+
+    for b in "$@"; do
+        if [[ -s "$tmp/$b.version" ]]; then
+            BRANCH_VERSIONS["$b"]="$(< "$tmp/$b.version")"
+        fi
+        [[ -s "$tmp/$b.date" ]] || continue
+        iso="$(< "$tmp/$b.date")"
+        # date -d on an ISO 8601 string is GNU behaviour. Everything this
+        # script targets has it, and where it does not the branch just prints
+        # without an age.
+        epoch="$(date -d "$iso" +%s 2>/dev/null)" || continue
+        [[ "$epoch" =~ ^[0-9]+$ ]] || continue
+        BRANCH_UPDATED["$b"]="$epoch"
+        if [[ -z "$newest" || "$epoch" -gt "$newest" ]]; then
+            newest="$epoch"
+        fi
+    done
+
+    # Ties are real: asahi and asahi-wip often share a tip. Marking every
+    # branch that sits on the newest commit is truer than picking one.
+    if [[ -n "$newest" ]]; then
+        for b in "$@"; do
+            [[ "${BRANCH_UPDATED[$b]:-}" == "$newest" ]] && BRANCH_NEWEST+=" $b "
+        done
+    fi
+
+    rm -rf "$tmp"
+    return 0
+}
+
+# "Linux 7.1.6" for the menu, or a placeholder when the lookup did not answer.
+branch_version_label() {
+    local b="$1"
+    if [[ -n "${BRANCH_VERSIONS[$b]:-}" ]]; then
+        printf 'Linux %s' "${BRANCH_VERSIONS[$b]}"
+    elif [[ "$BRANCH_VERSION_LOOKUP" == "tried" ]]; then
+        printf 'Linux version unavailable (could not reach GitHub)'
+    else
+        # No lookup was made at all: not a GitHub remote, no curl, or the
+        # user turned it off. Saying "could not reach GitHub" here would send
+        # someone debugging a network that was never used.
+        printf 'Linux version not checked'
+    fi
+}
+
+# " - updated 3 days ago (most recent)", or nothing at all when the date
+# lookup came back empty. Silence is deliberate: a menu line that says
+# "updated unknown" is noise next to a version that already says as much.
+branch_updated_label() {
+    local b="$1" age
+    [[ -n "${BRANCH_UPDATED[$b]:-}" ]] || return 0
+    age=$(( $(date +%s) - BRANCH_UPDATED[$b] ))
+    printf ' - updated %s' "$(relative_age "$age")"
+    case "$BRANCH_NEWEST" in
+        *" $b "*) printf ' (most recent)' ;;
+    esac
+}
+
 # --- Choose which Asahi branch to build ---
 #
 # Skipped entirely if BRANCH is already set in the environment.
 select_branch() {
     if [[ -n "$BRANCH" ]]; then
-        info "BRANCH is set to '$BRANCH', not asking"
+        prefetch_branch_versions "$BRANCH"
+        if [[ -n "${BRANCH_VERSIONS[$BRANCH]:-}" ]]; then
+            info "BRANCH is set to '$BRANCH' (Linux ${BRANCH_VERSIONS[$BRANCH]}), not asking"
+        else
+            info "BRANCH is set to '$BRANCH', not asking"
+        fi
         return
     fi
 
+    info "Looking up the current kernel version on each branch ..."
+    prefetch_branch_versions fairydust asahi asahi-wip
+
     echo ""
     echo "Which Asahi branch do you want to build?"
+    echo "Versions below are read live from the branch tips, not hard-coded."
     echo ""
     echo "  1) fairydust   The main Asahi base plus experimental USB-C"
     echo "                 DisplayPort alt mode, so external displays over"
-    echo "                 USB-C work. Currently Linux 7.1.5."
+    echo "                 USB-C work."
+    echo "                 $(branch_version_label fairydust)$(branch_updated_label fairydust)"
     echo ""
     echo "  2) asahi       The main Asahi branch, and what Fedora Asahi Remix"
-    echo "                 builds its kernel from. Also 7.1.5, without the"
-    echo "                 USB-C alt mode work. Pick this if you only use the"
-    echo "                 built-in HDMI port."
+    echo "                 builds its kernel from, without the USB-C alt mode"
+    echo "                 work. Pick this if you only use the built-in HDMI"
+    echo "                 port."
+    echo "                 $(branch_version_label asahi)$(branch_updated_label asahi)"
     echo ""
     echo "  3) asahi-wip   Asahi's development branch. Closer to upstream, but"
     echo "                 less tested and without the USB-C alt mode work."
-    echo "                 Also 7.1.5 at the moment."
+    echo "                 $(branch_version_label asahi-wip)$(branch_updated_label asahi-wip)"
     echo ""
     echo "  The HDMI suspend fix applies to all three: the display driver is"
     echo "  identical on each."
     echo ""
-    echo "  BORE targets 7.1 and applies to all three as well. That will stop"
-    echo "  being true the moment one of them rebases ahead of the others."
+
+    # BORE is written against one kernel release. While the three branches sit
+    # on the same version it applies to all of them; the moment one rebases
+    # ahead that stops being true, and the patch is skipped rather than
+    # failing the build. Say which of those two worlds we are in right now.
+    # grep -c exits 1 on a count of zero, which under set -e would end the run
+    # here, in a cosmetic block, on a machine that merely has no network.
+    local versions_seen
+    versions_seen="$(printf '%s\n' "${BRANCH_VERSIONS[@]:-}" | sort -u | grep -c . || true)"
+    if [[ "$versions_seen" -gt 1 ]]; then
+        warn "These branches are NOT all on the same kernel version any more."
+        warn "BORE targets one release, so it may apply to some and be skipped"
+        warn "on others. The patch summary at the end of the run says which."
+    elif [[ "$versions_seen" == "1" ]]; then
+        echo "  BORE targets a single kernel release and applies to all three"
+        echo "  while they sit on the same version, as they do now."
+    else
+        echo "  BORE targets a single kernel release. It applies while these"
+        echo "  branches share a version, and is skipped where it does not fit."
+    fi
     echo ""
 
     if [[ "${ASSUME_YES:-0}" == "1" ]]; then
@@ -329,11 +544,32 @@ or set BRANCH=fairydust (or asahi / asahi-wip) to choose without prompting."
     ok "Building branch: $BRANCH"
 }
 
+# --- Read the kernel version out of the Makefile at some revision ---
+#
+# "7.1.5", from a revision that need not be checked out. A commit id on its own
+# does not tell you whether an update is a handful of driver fixes or a rebase
+# onto a whole new upstream release, and that difference decides whether the
+# patches in patches/ still apply.
+#
+# Prints nothing if the revision has no readable Makefile, so callers can test
+# for an empty string rather than getting a bare "..".
+tree_version() {
+    local rev="$1"
+    git show "${rev}:Makefile" 2>/dev/null | parse_makefile_version
+}
+
 # --- Bring an existing checkout up to date ---
 #
 # Re-running this script on an existing tree used to rebuild the exact same
 # source, which is surprising if you ran it again expecting to pick up
-# upstream changes. Fetch, and offer to fast-forward.
+# upstream changes. Fetch, compare against the branch tip, and offer to move.
+#
+# The comparison is HEAD's commit id against the fetched tip, NOT a count of
+# how many commits we are behind. Asahi rebases and force-pushes fairydust,
+# asahi and asahi-wip regularly, and after a force-push that rewinds the branch
+# there are zero commits in HEAD..FETCH_HEAD while the tree is still not what
+# upstream is publishing. A count-based check calls that "up to date" and
+# quietly builds the old source; comparing ids catches it.
 #
 # The tree is normally dirty at this point, because the previous run applied
 # patches to it without committing them. Those are regenerated from patches/
@@ -342,28 +578,69 @@ or set BRANCH=fairydust (or asahi / asahi-wip) to choose without prompting."
 #
 #   UPDATE_SOURCE=0   never touch the existing tree
 update_source() {
-    local behind
+    local local_sha remote_sha counts ahead behind local_ver remote_ver
 
     if [[ "${UPDATE_SOURCE:-1}" != "1" ]]; then
         info "UPDATE_SOURCE=0, leaving the existing tree alone"
+        info "HEAD: $(git log --oneline -1)"
         return
     fi
 
-    info "Checking for upstream changes on $BRANCH ..."
+    info "Checking $CLONE_DIR against origin/$BRANCH ..."
     if ! git fetch origin "$BRANCH" 2>&1 | tee -a "$LOG_FILE"; then
-        warn "Could not fetch. Building the tree as it stands."
+        # The checkout's own remote, not $REPO_URL: an existing tree may have
+        # been cloned from somewhere else, and naming the wrong URL sends
+        # people looking for a network problem that is not there.
+        warn "Could not fetch $BRANCH from $(git remote get-url origin 2>/dev/null || echo origin). Check your network."
+        warn "Building the tree as it stands, which may be out of date:"
+        warn "  $(git log --oneline -1)"
         return
     fi
 
-    behind="$(git rev-list --count "HEAD..FETCH_HEAD" 2>/dev/null || echo 0)"
-    if [[ "$behind" == "0" ]]; then
-        ok "Already up to date with origin/$BRANCH"
+    local_sha="$(git rev-parse HEAD)"
+    remote_sha="$(git rev-parse FETCH_HEAD)"
+
+    if [[ "$local_sha" == "$remote_sha" ]]; then
+        local_ver="$(tree_version HEAD)"
+        ok "Up to date with origin/$BRANCH${local_ver:+ (Linux $local_ver)}"
+        info "HEAD: $(git log --oneline -1)"
         return
     fi
+
+    # --left-right --count on a three-dot range gives "<ahead> <behind>":
+    # commits reachable from HEAD only, then from FETCH_HEAD only.
+    counts="$(git rev-list --left-right --count "HEAD...FETCH_HEAD" 2>/dev/null || echo "0 0")"
+    ahead="${counts%%[[:space:]]*}"
+    behind="${counts##*[[:space:]]}"
 
     echo ""
-    info "$behind new commit(s) upstream:"
-    git log --oneline --max-count=10 "HEAD..FETCH_HEAD" | tee -a "$LOG_FILE"
+    if [[ "$ahead" == "0" ]]; then
+        info "$behind new commit(s) on origin/$BRANCH:"
+    else
+        # Either upstream rebased the branch out from under this checkout, or
+        # someone committed locally. Both need a hard reset, not a merge.
+        warn "This checkout has diverged from origin/$BRANCH:"
+        warn "  $ahead commit(s) here that upstream does not have"
+        warn "  $behind commit(s) upstream that this tree does not have"
+        warn "Asahi force-pushes these branches, so this is usually a rebase."
+    fi
+    # Empty on a pure rewind, where upstream has nothing this tree lacks. Show
+    # the tip instead, so the branch is always identified by something.
+    if [[ "$behind" == "0" ]]; then
+        info "origin/$BRANCH is now at: $(git log --oneline -1 FETCH_HEAD)"
+    else
+        [[ "$ahead" == "0" ]] || info "Newest upstream commits:"
+        git log --oneline --max-count=10 "HEAD..FETCH_HEAD" | tee -a "$LOG_FILE"
+    fi
+
+    local_ver="$(tree_version HEAD)"
+    remote_ver="$(tree_version FETCH_HEAD)"
+    if [[ -n "$local_ver" && -n "$remote_ver" && "$local_ver" != "$remote_ver" ]]; then
+        echo ""
+        warn "Upstream moved from Linux $local_ver to $remote_ver."
+        warn "Patches in patches/ that no longer apply are reported and skipped,"
+        warn "so check the patch summary before trusting this build."
+    fi
     echo ""
 
     if ! git diff --quiet || ! git diff --cached --quiet; then
@@ -372,7 +649,8 @@ update_source() {
     fi
 
     if ! confirm "Update the source tree to origin/$BRANCH?"; then
-        info "Keeping the current source."
+        warn "Keeping the current source. This build will NOT include the"
+        warn "commits listed above."
         return
     fi
 
@@ -845,6 +1123,7 @@ print_summary() {
     echo ""
     echo "  Kernel version:   $KVER"
     echo "  Branch built:     $BRANCH"
+    echo "  Source commit:    $(cd "$CLONE_DIR" && git log --oneline -1)"
     echo "  Source tree:      $CLONE_DIR"
     echo "  Build log:        $LOG_FILE"
     echo ""
