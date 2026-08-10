@@ -130,6 +130,7 @@ Most behaviour is environment-overridable:
 | `SKIP_PATCHES` | `0` | Build the branch unpatched |
 | `PATCHES` | *(asks)* | Comma-separated filename substrings, case-insensitive |
 | `UPDATE_SOURCE` | `1` | Set to `0` to never refresh an existing checkout |
+| `SKIP_VERSION_LOOKUP` | `0` | Set to `1` to skip the live kernel-version lookup in the branch menu |
 | `FAIRYDUST_REFRESH` | `1` | ALARM only. `0` uses the shipped patch snapshot instead of refetching |
 | `ALARM_PKGBUILDS_DIR` | `$HOME/PKGBUILDs` | ALARM only. Where to clone `asahi-alarm/PKGBUILDs` |
 | `RUST_LIB_SRC` | *(autodetected)* | Path to the Rust library source, if autodetection picks wrong |
@@ -192,34 +193,66 @@ The script builds straight from **AsahiLinux/linux** and applies `patches/` on t
 
 On startup it asks which branch you want:
 
-| | Branch | Version | What it is |
-|---|---|---|---|
-| 1 | `fairydust` *(default)* | 7.1.5 | The main Asahi base plus experimental USB-C DisplayPort alt mode, so external displays over USB-C work. |
-| 2 | `asahi` | 7.1.5 | The main Asahi branch, and what Fedora Asahi Remix builds its kernel from. Same base, without the USB-C alt mode work. |
-| 3 | `asahi-wip` | 7.1.5 | Asahi's development branch. Closer to upstream, less tested, no USB-C alt mode. |
+| | Branch | What it is |
+|---|---|---|
+| 1 | `fairydust` *(default)* | The main Asahi base plus experimental USB-C DisplayPort alt mode, so external displays over USB-C work. |
+| 2 | `asahi` | The main Asahi branch, and what Fedora Asahi Remix builds its kernel from. Same base, without the USB-C alt mode work. |
+| 3 | `asahi-wip` | Asahi's development branch. Closer to upstream, less tested, no USB-C alt mode. |
 
-All three sat on 7.0.13 until upstream rebased them onto 7.1.5 in late July 2026. Fedora Asahi Remix lags the branch, so the kernel you are running now is probably still 7.0.x.
+The menu prints the kernel version each branch is on, read live from the branch tips at the moment you run it:
+
+```
+  1) fairydust   The main Asahi base plus experimental USB-C
+                 DisplayPort alt mode, so external displays over
+                 USB-C work.
+                 Linux 7.1.6
+```
+
+Those numbers are not hard-coded, because they go stale: all three branches sat on 7.0.13 until upstream rebased them onto 7.1.5 in late July 2026, and onto 7.1.6 after that. The version comes from each branch's `Makefile` on `raw.githubusercontent.com` — three small HTTP requests issued in parallel, capped at six seconds, never a clone. If the lookup cannot answer, the menu prints without versions and the build carries on; `SKIP_VERSION_LOOKUP=1` skips it outright, and a `REPO_URL` that is not a GitHub URL is never looked up at all.
+
+If the branches are no longer on the same version, the menu says so, because that is when the BORE patch stops applying to all of them.
+
+Fedora Asahi Remix lags the branch, so the stock kernel you are running is normally a release or two behind whatever the menu shows.
 
 **The HDMI suspend fix applies to all three** — `dcp.c` is identical on each, and the bug is present on all of them, including the stable `asahi` branch that most people are running.
 
 Pick `fairydust` if you drive a monitor over USB-C as well as HDMI. Pick `asahi` if you only use the built-in HDMI port and would rather stay on the branch Fedora Asahi Remix ships. Pick `asahi-wip` if you want to track upstream more closely and accept it is less tested.
 
-The BORE patch targets 7.1 and currently applies to all three, since their scheduler sources are identical. That stops being true as soon as one of them rebases ahead of the others — the patch is then reported as skipped rather than failing the build.
+The BORE patch targets 7.1 and applies to all three while their scheduler sources are identical. That stops being true as soon as one of them rebases ahead of the others — the patch is then reported as skipped rather than failing the build.
 
-Skip the menu with `BRANCH=fairydust`, `BRANCH=asahi` or `BRANCH=asahi-wip`.
+Skip the menu with `BRANCH=fairydust`, `BRANCH=asahi` or `BRANCH=asahi-wip`. The version is still looked up and printed for the branch you named.
 
 ### Updating later
 
-Re-run the script. It fetches the branch, shows you what is new, and asks before fast-forwarding:
+Re-run the script. Before it builds anything, it fetches the branch you selected, compares your checkout against the branch tip, shows you what is new, and asks before moving:
 
 ```
-[INFO]  Checking for upstream changes on fairydust ...
-[INFO]  12 new commit(s) upstream:
+[INFO]  Checking /home/you/linux-fairydust against origin/fairydust ...
+[INFO]  12 new commit(s) on origin/fairydust:
         a1b2c3d drm/apple: ...
 Update the source tree to origin/fairydust? [y/N]:
 ```
 
-Say yes and it resets the tree, reapplies `patches/`, and rebuilds. Say no and it rebuilds what you already have. `UPDATE_SOURCE=0` skips the check entirely.
+Say yes and it resets the tree to the fetched tip, reapplies `patches/`, and rebuilds. Say no and it rebuilds what you already have, and says so. `UPDATE_SOURCE=0` skips the check entirely. If there is no source tree yet, the fresh clone is at the tip by definition.
+
+The comparison is your checkout's commit id against the fetched tip, not a count of commits you are behind. Asahi force-pushes `fairydust`, `asahi` and `asahi-wip` when it rebases them, and after a force-push your tree can hold commits upstream has thrown away while being behind by zero. That is reported as a divergence rather than as "up to date":
+
+```
+[WARN]  This checkout has diverged from origin/fairydust:
+[WARN]    3 commit(s) here that upstream does not have
+[WARN]    0 commit(s) upstream that this tree does not have
+[WARN]  Asahi force-pushes these branches, so this is usually a rebase.
+```
+
+If the update crosses a kernel release — say the branch rebases from 7.1.5 onto 7.2 — the script says so before you agree to it, because that is when patches in `patches/` are most likely to stop applying:
+
+```
+[WARN]  Upstream moved from Linux 7.1.5 to 7.2.0.
+```
+
+Patches that no longer apply are reported and skipped, not silently dropped, so read the patch summary at the end of the run before trusting the build.
+
+A fetch that fails (no network, upstream unreachable) is a warning, not a fatal error: the script names the commit it is about to build instead and carries on.
 
 Note that the custom kernel is installed with `make install`, not as an RPM, so `dnf` does not manage it and will never update it on its own — re-running this script is the update mechanism. Your stock Fedora kernel keeps updating through `dnf` as normal and stays bootable in GRUB.
 
