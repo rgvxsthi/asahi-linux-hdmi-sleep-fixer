@@ -107,31 +107,69 @@ Full checklist in [TESTING.md](TESTING.md).
 
 ### Reverting
 
-Your stock kernel is untouched and stays in GRUB — select it at boot. To remove custom kernels, boot into stock and run `./asahi-fairydust-uninstall.sh`.
+Your stock kernel is untouched and stays in GRUB — select it at boot. To remove custom kernels, run `./asahi-fairydust-uninstall.sh`. You do not have to reboot into stock first: the uninstaller runs from a custom kernel too.
 
 It reads `LOCALVERSION`, `CLONE_DIR` and `ASSUME_YES` the same way the build script does, so export the same values you built with or it will not find what it is meant to remove.
 
 Kernels are picked from a menu, so a machine carrying several builds can drop the old ones and keep the one it boots:
 
 ```
-Custom kernel(s) found. Your stock kernel(s) are not listed and are
-never removed by this script:
+Custom kernel(s) found. This menu is the kernels this repo built;
+your stock kernels are listed under it and are not removed here:
 
   1) 7.0.13-fairydust               412M  installed 2026-07-14
   2) 7.1.5-hdmifix+                 408M  installed 2026-07-29
-  3) 7.1.6-hdmifix+                 410M  installed 2026-08-11  <- newest build, GRUB default
+  3) 7.1.6-hdmifix+                 410M  installed 2026-08-11  <- RUNNING NOW - removing this is dangerous, newest build, GRUB default
 
-  Keeping (not removable):
-     7.1.6-400.asahi.fc44.aarch64+16k   installed 2026-08-05  (running now)
+  Red is the kernel you booted into. You can remove it, and this
+  machine will still boot: 7.1.6-400.asahi.fc44.aarch64+16k is untouched. But the
+  running system loses its modules the moment it goes, so anything
+  not already loaded stays unloadable until you reboot.
 
-Remove which? [numbers, 'all', or Enter to keep all]:
+  Stock kernels (not in this list - the older ones are offered
+  separately once this menu is done):
+     7.0.13-400.asahi.fc44.aarch64+16k  installed 2026-06-24
+     7.1.5-400.asahi.fc44.aarch64+16k   installed 2026-07-26
+     7.1.6-400.asahi.fc44.aarch64+16k   installed 2026-08-05
+
+Remove which? [numbers, e.g. 1 3 4 or 1,3,4 - 'all', or Enter to keep all]:
 ```
+
+Pick more than one by listing them: `1 3` and `1,3` both work, `all` takes everything in that menu, and Enter alone keeps everything.
+
+Entry 3 there is printed in red, and it is the one choice in this menu that is not routine. A running kernel lives in memory, not in `/boot`, so removing it does not stop the machine — but every module it has not already loaded becomes unloadable, and you find that out by plugging something in. Selecting it swaps the usual `[y/N]` for a prompt that wants the word `yes` typed out, and prints what stays bootable before asking.
 
 A kernel is only listed when **two** independent tests agree: its name matches a suffix this repo builds with, *and* no package owns it. The name alone is not enough — Asahi ships 4k and 16k page-size kernels side by side, so a `LOCALVERSION` like `-16k` matches stock kernel names, and name matching on its own would hand the uninstaller three stock kernels to delete. A kernel from `dnf` is owned by `kernel-core`; one this repo installed with `make install` is owned by nothing, and that is the difference the script actually acts on. Anything that matches by name but turns out to be package-owned is reported and protected rather than silently kept.
 
-On top of that: the running kernel is never a candidate whatever it is called, and the script refuses to run at all if every kernel on the machine looks like one of ours. If the kernel GRUB boots by default is one of those removed, the default is moved to the kernel you are running before GRUB is regenerated. Where neither `rpm` nor `pacman` can be queried, the weaker name-only test is all there is, and the script says so before showing the list.
+On top of that, the script refuses to run at all if every kernel on the machine looks like one of ours, so a stock kernel always survives whatever you pick. If the kernel GRUB boots by default is one of those removed, the default is moved to that surviving stock kernel before GRUB is regenerated — not to the kernel you are running, which may itself be one of the kernels that just went. Where neither `rpm` nor `pacman` can be queried, the weaker name-only test is all there is, and the script says so before showing the list.
 
 m1n1 is only put back on the stock kernel when the **last** of our kernels goes. It boots one set of device trees, and a kernel of ours that you chose to keep still expects the DTBs it was built with, so a partial removal leaves m1n1 alone and only regenerates GRUB.
+
+Unattended, `KERNELS=all` deliberately does *not* include the kernel you are running: an invocation written before this was possible must not start removing it. Name it in `KERNELS` explicitly, or set `ALLOW_RUNNING=1`.
+
+#### Old stock kernels
+
+Fedora keeps three kernels installed at a time, so after a couple of `dnf` updates two of them are dead weight. A second menu offers the older ones once the first is done:
+
+```
+Older stock kernels found. These are dnf packages, so they are removed
+with dnf rather than deleted, and dnf takes their modules with them:
+
+  1) 7.0.13-400.asahi.fc44.aarch64+16k    393M  installed 2026-06-24
+  2) 7.1.5-400.asahi.fc44.aarch64+16k     414M  installed 2026-07-26
+
+  Keeping (never offered here):
+     7.1.6-400.asahi.fc44.aarch64+16k   newest stock kernel
+     7.1.6-hdmifix+                     running now
+
+Remove which? [numbers, e.g. 1 3 4 or 1,3,4 - 'all', or Enter to keep all]:
+```
+
+These are RPMs, and an RPM is not uninstalled with `rm`. Deleting the files by hand leaves the rpm database describing packages whose files are gone, keeps the install-only slot occupied so `dnf` still refuses to fetch a new kernel, and skips the `kernel-install` and bootloader hooks. So the script hands the selection to `dnf remove` in a single transaction, naming the `-core` package for each version — `dnf` pulls in the matching `-modules`, `-modules-core` and `-modules-extra` by dependency. The package name is read off `/boot/vmlinuz-<version>` rather than assumed: on Fedora Asahi it is `kernel-16k-core`, not `kernel-core`.
+
+Two kernels are never offered here, and between them they are why "a stock kernel survives" needs no separate check: the one running now, and the newest stock kernel — the one m1n1, `/usr/src/linux` and the GRUB fallback are pointed at. To remove either of those, or to keep an older one in preference to the newest, use `dnf` directly.
+
+`STOCK_KERNELS=old` takes everything the menu would offer, `STOCK_KERNELS=none` skips the question, and a comma-separated version list picks specific ones. `ASSUME_YES` on its own does **not** remove them: it was written to mean "remove the kernels I built", and distro packages are not this script's to take on a blanket yes. This section is skipped entirely without both `rpm` and `dnf`.
 
 Each entry carries its install date, taken from the mtime of its `vmlinuz`, and the most recently installed of your builds is marked — version numbers do not answer "which one did I build last", because a rebuild of an older branch is newer on disk while sorting lower.
 
@@ -179,6 +217,8 @@ Most behaviour is environment-overridable:
 | `ASSUME_YES` | `0` | Answer prompts automatically. Never deletes the source tree on its own — see `REMOVE_SOURCE` |
 | `REMOVE_SOURCE` | *(asks)* | Uninstaller only. `1` deletes the kernel source tree unattended, `0` keeps it without asking |
 | `KERNELS` | *(asks)* | Uninstaller only. `all`, or a comma-separated list of kernel versions to remove |
+| `ALLOW_RUNNING` | `0` | Uninstaller only. `1` lets `KERNELS=all` include the running kernel, and answers the `yes` prompt |
+| `STOCK_KERNELS` | *(asks)* | Uninstaller only. `old`, `none`, or a comma-separated list of stock kernel versions to remove with `dnf` |
 | `CLEANUP` | *(asks)* | Uninstaller only. `all`, `none`, or keys from `source,log,pkgbuilds,legacy` |
 | `SET_DEFAULT` | *(asks)* | Which kernel GRUB boots. Build script: `1` / `0`. Uninstaller: a version, or `keep` |
 | `NO_REBOOT` | `0` | Never reboot, even unattended |
