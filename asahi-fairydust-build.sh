@@ -1099,6 +1099,86 @@ update_grub() {
     sudo grub2-mkconfig -o /boot/grub2/grub.cfg 2>&1 | tee -a "$LOG_FILE"
 
     ok "GRUB updated (5-second menu timeout)"
+
+    offer_default_kernel
+}
+
+# --- Boot the kernel we just built by default? ---
+#
+# Asked rather than assumed, and defaulting to no. A kernel that has never been
+# booted is exactly the wrong thing to make the automatic choice on a machine
+# whose owner may not be in front of it next time it starts. Saying yes is a
+# fair choice too, which is why it is offered at all: the GRUB menu is set to a
+# 5-second timeout just above, so a kernel that does not boot is one reboot and
+# one menu selection away from being escaped.
+#
+#   SET_DEFAULT=1   boot the new kernel by default, without asking
+#   SET_DEFAULT=0   leave the default alone, without asking
+offer_default_kernel() {
+    local kver current
+
+    command -v grubby >/dev/null 2>&1 || return 0
+    kver="$(cd "$CLONE_DIR" && make -s kernelrelease 2>/dev/null)" || return 0
+    [[ -n "$kver" && -e "/boot/vmlinuz-$kver" ]] || return 0
+
+    current="$(sudo grubby --default-kernel 2>/dev/null || true)"
+    current="${current##*/vmlinuz-}"
+    [[ "$current" == /* ]] && current=""
+
+    if [[ "$current" == "$kver" ]]; then
+        info "GRUB already boots $kver by default"
+        return 0
+    fi
+
+    echo ""
+    echo "  GRUB currently boots ${current:-your existing kernel} by default."
+    echo "  The kernel just built is $kver."
+    echo ""
+    echo "  If you make it the default and it does not boot, hold or press a"
+    echo "  key at startup to get the GRUB menu, then pick ${current:-your previous kernel}."
+    echo "  Nothing about your existing kernels has been changed, so they are"
+    echo "  all still there to fall back on."
+    echo ""
+
+    case "${SET_DEFAULT:-}" in
+        1) info "SET_DEFAULT=1, making $kver the boot default" ;;
+        0) info "SET_DEFAULT=0, leaving the boot default alone"; return 0 ;;
+        *)
+            # ASSUME_YES answers this one as no. It exists so a long build can
+            # run unattended, and that is the case where nobody is watching to
+            # rescue a machine that does not come back up.
+            if [[ "${ASSUME_YES:-0}" == "1" ]]; then
+                info "Leaving the boot default alone: ASSUME_YES does not change it."
+                info "Pass SET_DEFAULT=1 to boot the new kernel by default."
+                return 0
+            fi
+            if ! confirm "Make $kver the default kernel in GRUB?"; then
+                info "Boot default left at ${current:-its current setting}."
+                info "Select the new kernel from the GRUB menu at boot."
+                return 0
+            fi
+            ;;
+    esac
+
+    if ! sudo grubby --set-default="/boot/vmlinuz-$kver" >/dev/null 2>&1; then
+        warn "Could not set the boot default. Pick $kver from the GRUB menu."
+        return 0
+    fi
+
+    # Read it back: grubby writes through to /boot/grub2/grubenv on a
+    # GRUB_DEFAULT=saved system, and a write that did not take would otherwise
+    # be reported here as a success.
+    local now
+    now="$(sudo grubby --default-kernel 2>/dev/null || true)"
+    now="${now##*/vmlinuz-}"
+    if [[ "$now" == "$kver" ]]; then
+        DEFAULT_KERNEL_SET="$kver"
+        FALLBACK_KERNEL="$current"
+        ok "GRUB will boot $kver by default"
+    else
+        warn "Asked GRUB to boot $kver by default, but it still reports"
+        warn "${now:-nothing}. Pick the kernel from the GRUB menu instead."
+    fi
 }
 
 # --- Step 8: Setup Typec Module Autoloading ---
@@ -1133,8 +1213,25 @@ print_summary() {
         echo ""
     fi
     echo "  NEXT STEPS:"
-    echo "  1. Reboot:  sudo reboot"
-    echo "  2. In the GRUB menu, select the kernel with '${LOCALVERSION}'"
+    if [[ -n "${DEFAULT_KERNEL_SET:-}" ]]; then
+        echo "  1. Reboot:  sudo reboot"
+        echo "  2. Nothing to pick: GRUB boots $DEFAULT_KERNEL_SET by default now."
+        echo ""
+        echo "  IF IT DOES NOT BOOT:"
+        echo "    Press or hold a key at startup to get the GRUB menu, then"
+        if [[ -n "${FALLBACK_KERNEL:-}" ]]; then
+            echo "    select $FALLBACK_KERNEL, which is what booted before this build."
+        else
+            echo "    select one of your other kernels — they are all untouched."
+        fi
+        echo "    From there, re-run this script or the uninstaller to undo it."
+    else
+        echo "  1. Reboot:  sudo reboot"
+        echo "  2. In the GRUB menu, select the kernel with '${LOCALVERSION}'"
+        echo ""
+        echo "  GRUB still boots your existing kernel by default, so a kernel"
+        echo "  that misbehaves costs you nothing but the menu selection."
+    fi
     echo ""
     echo "  VERIFY AFTER BOOT:"
     echo "    uname -r                                   # should contain ${LOCALVERSION}"
