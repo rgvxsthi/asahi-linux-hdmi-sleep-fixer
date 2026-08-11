@@ -107,11 +107,63 @@ Full checklist in [TESTING.md](TESTING.md).
 
 ### Reverting
 
-Your stock kernel is untouched and stays in GRUB — select it at boot. To remove the custom kernel entirely, boot into stock and run `./asahi-fairydust-uninstall.sh`.
+Your stock kernel is untouched and stays in GRUB — select it at boot. To remove custom kernels, boot into stock and run `./asahi-fairydust-uninstall.sh`.
 
 It reads `LOCALVERSION`, `CLONE_DIR` and `ASSUME_YES` the same way the build script does, so export the same values you built with or it will not find what it is meant to remove.
 
-`ASSUME_YES=1` removes the kernel, modules and dtbs — all rebuildable — but deliberately leaves the source tree alone, because that is several GB that may hold uncommitted local changes. Add `REMOVE_SOURCE=1` to delete it too, or `REMOVE_SOURCE=0` to keep it without being asked.
+Kernels are picked from a menu, so a machine carrying several builds can drop the old ones and keep the one it boots:
+
+```
+Custom kernel(s) found. Your stock kernel(s) are not listed and are
+never removed by this script:
+
+  1) 7.0.13-fairydust               412M  installed 2026-07-14
+  2) 7.1.5-hdmifix+                 408M  installed 2026-07-29
+  3) 7.1.6-hdmifix+                 410M  installed 2026-08-11  <- newest build, GRUB default
+
+  Keeping (not removable):
+     7.1.6-400.asahi.fc44.aarch64+16k   installed 2026-08-05  (running now)
+
+Remove which? [numbers, 'all', or Enter to keep all]:
+```
+
+A kernel is only listed when **two** independent tests agree: its name matches a suffix this repo builds with, *and* no package owns it. The name alone is not enough — Asahi ships 4k and 16k page-size kernels side by side, so a `LOCALVERSION` like `-16k` matches stock kernel names, and name matching on its own would hand the uninstaller three stock kernels to delete. A kernel from `dnf` is owned by `kernel-core`; one this repo installed with `make install` is owned by nothing, and that is the difference the script actually acts on. Anything that matches by name but turns out to be package-owned is reported and protected rather than silently kept.
+
+On top of that: the running kernel is never a candidate whatever it is called, and the script refuses to run at all if every kernel on the machine looks like one of ours. If the kernel GRUB boots by default is one of those removed, the default is moved to the kernel you are running before GRUB is regenerated. Where neither `rpm` nor `pacman` can be queried, the weaker name-only test is all there is, and the script says so before showing the list.
+
+m1n1 is only put back on the stock kernel when the **last** of our kernels goes. It boots one set of device trees, and a kernel of ours that you chose to keep still expects the DTBs it was built with, so a partial removal leaves m1n1 alone and only regenerates GRUB.
+
+Each entry carries its install date, taken from the mtime of its `vmlinuz`, and the most recently installed of your builds is marked — version numbers do not answer "which one did I build last", because a rebuild of an older branch is newer on disk while sorting lower.
+
+Once the removals are done and GRUB is regenerated, it asks which of the surviving kernels should boot by default, with the current default marked. Enter keeps things as they are; `SET_DEFAULT=<version>` or `SET_DEFAULT=keep` answers it without asking. The choice is written with `grubby` and then read back, so a write that did not take is reported instead of assumed:
+
+```
+Which kernel should GRUB boot by default?
+
+  1) 7.0.13-400.asahi.fc44.aarch64+16k  installed 2026-06-24
+  2) 7.1.6-400.asahi.fc44.aarch64+16k   installed 2026-08-05  <- current default  (running now)
+  3) 7.1.6-hdmifix+                     installed 2026-08-11
+
+Boot which by default? [number, or Enter to keep 7.1.6-400.asahi.fc44.aarch64+16k]:
+```
+
+Then the build leftovers are offered separately, each with its size, including when there was no kernel left to remove:
+
+```
+Build leftovers found:
+
+  1) Kernel source tree                      4.2G  /home/you/linux-fairydust
+  2) Build log                                18M  /home/you/fairydust-build.log
+  3) ALARM PKGBUILDs tree                    120M  /home/you/PKGBUILDs
+
+Remove which? [numbers, 'all', or Enter to keep all]:
+```
+
+Each of those paths comes from the environment (`CLONE_DIR`, `LOG_FILE`, `ALARM_PKGBUILDS_DIR`) and is then handed to `rm -rf`, so before anything is offered it has to contain what its label claims: a source tree needs a `Makefile`, `.config` or `.git`, a log needs to be a regular file. A path that fails is named and skipped rather than removed — `CLONE_DIR=$HOME` with `CLEANUP=all` would otherwise delete a home directory with no prompt in between.
+
+`ASSUME_YES=1` removes the kernels, modules and dtbs — all rebuildable — but deliberately leaves every one of those leftovers alone, because the source tree is several GB that may hold uncommitted local changes. `CLEANUP=all` removes them unattended, `CLEANUP=log,source` picks by key (`source`, `log`, `pkgbuilds`, `legacy`), and `CLEANUP=none` keeps them without asking. An unrecognised key is an error, not a silent no-op. `REMOVE_SOURCE=1` / `REMOVE_SOURCE=0` still decides the source tree specifically and still wins, so existing unattended invocations behave exactly as they did — and it now decides the source tree *only*, leaving the log and the PKGBUILDs tree to the menu instead of suppressing it.
+
+`KERNELS` skips the kernel menu the way `BRANCH` skips the branch menu: `KERNELS=all`, or a comma-separated list of versions. A version in that list that is not a removable custom kernel is an error rather than a silent no-op.
 
 ## Configuration
 
@@ -126,6 +178,9 @@ Most behaviour is environment-overridable:
 | `JOBS` | `$(nproc)` | Parallel build jobs |
 | `ASSUME_YES` | `0` | Answer prompts automatically. Never deletes the source tree on its own — see `REMOVE_SOURCE` |
 | `REMOVE_SOURCE` | *(asks)* | Uninstaller only. `1` deletes the kernel source tree unattended, `0` keeps it without asking |
+| `KERNELS` | *(asks)* | Uninstaller only. `all`, or a comma-separated list of kernel versions to remove |
+| `CLEANUP` | *(asks)* | Uninstaller only. `all`, `none`, or keys from `source,log,pkgbuilds,legacy` |
+| `SET_DEFAULT` | *(asks)* | Which kernel GRUB boots. Build script: `1` / `0`. Uninstaller: a version, or `keep` |
 | `NO_REBOOT` | `0` | Never reboot, even unattended |
 | `SKIP_PATCHES` | `0` | Build the branch unpatched |
 | `PATCHES` | *(asks)* | Comma-separated filename substrings, case-insensitive |
@@ -373,6 +428,7 @@ Beyond the HDMI patch, this fork carries build fixes that have been offered back
 ## Things it changes that you might not expect
 
 - Sets `GRUB_TIMEOUT_STYLE=menu` and `GRUB_TIMEOUT=5` in `/etc/default/grub`, so the boot menu appears. The uninstaller does not restore the previous values.
+- Asks, at the end of the build, whether GRUB should boot the new kernel by default. It defaults to **no**, and `ASSUME_YES=1` answers no: a kernel that has never been booted is the wrong thing to make automatic on a machine nobody is sitting in front of. `SET_DEFAULT=1` opts in, `SET_DEFAULT=0` opts out without asking. Say yes and the summary tells you which kernel to pick from the GRUB menu if the new one does not come up.
 - Points `/usr/src/linux` at the kernel source tree.
 - Enables `CONFIG_RCU_LAZY` (battery) and `CONFIG_SCHED_BORE` in the config regardless of whether you accepted the BORE patch. `SCHED_BORE` has no effect without that patch.
 - Requires working ICMP: it aborts if `ping github.com` fails, even where HTTPS would work.
