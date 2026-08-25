@@ -876,8 +876,11 @@ configure_kernel() {
         local srcver
         srcver="$(make -s kernelversion 2>/dev/null)"
         if [[ -n "$srcver" ]]; then
+            # || true is required: under set -eo pipefail, grep finding
+            # nothing (no distro config for this version) fails the pipeline
+            # and set -e kills the script here with no message at all.
             CURRENT_CONFIG="$(ls -1v /boot/config-"$srcver"-* 2>/dev/null \
-                | grep -Ev "$suffixes" | tail -1)"
+                | grep -Ev "$suffixes" | tail -1 || true)"
             [[ -n "$CURRENT_CONFIG" ]] \
                 && info "Matched a distro config for $srcver"
         fi
@@ -888,7 +891,7 @@ configure_kernel() {
         # are excluded: those are derived configs, not a distro baseline.
         if [[ -z "$CURRENT_CONFIG" ]]; then
             CURRENT_CONFIG="$(ls -1v /boot/config-* 2>/dev/null \
-                | grep -Ev "$suffixes" | tail -1)"
+                | grep -Ev "$suffixes" | tail -1 || true)"
             [[ -n "$CURRENT_CONFIG" ]] && warn \
                 "No distro config for $srcver. Using $(basename "$CURRENT_CONFIG"),
 which may predate options this kernel has. Symbols it does not know about
