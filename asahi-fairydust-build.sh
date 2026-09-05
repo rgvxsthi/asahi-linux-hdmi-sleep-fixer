@@ -1225,6 +1225,125 @@ notch_param_for() {
     fi
 }
 
+# --- The newest installed kernel we can name a show_notch argument for ---
+#
+# Used by the ALARM path, which has no per-entry boot config to walk: one
+# argument goes on one generated command line, so the newest kernel decides
+# which spelling that is. ALARM also keeps the kernel image inside
+# /usr/lib/modules/<version>/ rather than as /boot/vmlinuz-<version>, so this
+# is where both distros can be asked the same question.
+newest_notch_kernel() {
+    local d k
+    local -a kvers=()
+
+    for d in /usr/lib/modules/*/; do
+        [[ -d "$d" ]] || continue
+        kvers+=("$(basename "${d%/}")")
+    done
+    [[ ${#kvers[@]} -gt 0 ]] || return 1
+
+    while IFS= read -r k; do
+        if notch_param_for "$k" >/dev/null; then
+            echo "$k"
+            return 0
+        fi
+    done < <(printf '%s\n' "${kvers[@]}" | sort -Vr)
+
+    return 1
+}
+
+# --- Use the screen area beside the notch? (ALARM) ---
+#
+# Arch has no grubby and no per-kernel boot entries to write: the GRUB menu is
+# generated from /etc/default/grub by update-grub (from asahi-scripts) or by
+# grub-mkconfig. So the argument goes on GRUB_CMDLINE_LINUX_DEFAULT, which
+# every generated entry inherits, and the menu is regenerated afterwards or
+# the change does not reach the bootloader at all.
+#
+#   NOTCH=1   add the argument without asking
+#   NOTCH=0   leave the kernel command line alone
+offer_notch_arg_alarm() {
+    local grub_default="/etc/default/grub" arg kver var new
+
+    [[ -f "$grub_default" ]] || return 0
+
+    if ! kver="$(newest_notch_kernel)"; then
+        info "No installed kernel could be identified, so $grub_default was"
+        info "left alone."
+        return 0
+    fi
+    arg="$(notch_param_for "$kver")" || return 0
+
+    if grep -q 'show_notch' "$grub_default"; then
+        info "$grub_default already carries a show_notch argument"
+        return 0
+    fi
+
+    # Only a quoted assignment is edited. Anything else is someone's own
+    # arrangement, and a regex is the wrong tool for guessing at it.
+    if grep -q '^GRUB_CMDLINE_LINUX_DEFAULT="' "$grub_default"; then
+        var="GRUB_CMDLINE_LINUX_DEFAULT"
+    elif grep -q '^GRUB_CMDLINE_LINUX="' "$grub_default"; then
+        var="GRUB_CMDLINE_LINUX"
+    else
+        warn "No quoted GRUB_CMDLINE_LINUX_DEFAULT or GRUB_CMDLINE_LINUX line"
+        warn "in $grub_default, so it was left alone. To do it by hand:"
+        warn "  add $arg to that file, then run update-grub"
+        return 0
+    fi
+
+    echo ""
+    echo "  Macs with a notch hide the screen area either side of it unless"
+    echo "  the display driver is told to use the full panel."
+    echo ""
+    echo "  This adds $arg to $var"
+    echo "  in $grub_default and regenerates the GRUB menu."
+    echo "  To undo it later, take it back out of that file and run update-grub."
+    echo ""
+
+    case "${NOTCH:-}" in
+        1) info "NOTCH=1, adding $arg" ;;
+        0) info "NOTCH=0, leaving the kernel command line alone"; return 0 ;;
+        *)
+            if ! confirm_default_yes "Show the screen area beside the notch?"; then
+                info "Kernel command line left alone. Pass NOTCH=1 to add it later."
+                return 0
+            fi
+            ;;
+    esac
+
+    # Built first and checked before it is written: a substitution that matched
+    # nothing, or matched more than the one line, must not reach the file.
+    new="$(sed "s|^$var=\"\(.*\)\"|$var=\"\1 $arg\"|" "$grub_default")"
+    if [[ "$(printf '%s\n' "$new" | grep -c -- "$arg")" -ne 1 ]]; then
+        warn "Could not add $arg to $grub_default. Add it to $var by hand."
+        return 0
+    fi
+    if ! printf '%s\n' "$new" | sudo tee "$grub_default" >/dev/null; then
+        warn "Could not write $grub_default. Add $arg to $var by hand."
+        return 0
+    fi
+    ok "$arg added to $var"
+
+    # The file on its own changes nothing: the menu the machine boots is the
+    # generated one.
+    if command -v update-grub >/dev/null 2>&1; then
+        if sudo update-grub 2>&1 | tee -a "$LOG_FILE"; then
+            ok "GRUB menu regenerated"
+            return 0
+        fi
+    elif command -v grub-mkconfig >/dev/null 2>&1; then
+        if sudo grub-mkconfig -o /boot/grub/grub.cfg 2>&1 | tee -a "$LOG_FILE"; then
+            ok "GRUB menu regenerated"
+            return 0
+        fi
+    fi
+
+    warn "$grub_default was updated but the GRUB menu was not regenerated."
+    warn "Run 'sudo update-grub' (or 'sudo grub-mkconfig -o /boot/grub/grub.cfg')"
+    warn "or the argument will not reach the next boot."
+}
+
 # --- Use the screen area beside the notch? ---
 #
 # Macs with a notch (MacBook Pro 14"/16", MacBook Air 13"/15" M2 and later)
@@ -1700,6 +1819,8 @@ The PKGBUILD layout has probably changed. Add it to source=() by hand and re-run
     fi
 
     makepkg -si 2>&1 | tee -a "$LOG_FILE"
+
+    offer_notch_arg_alarm
 
     echo ""
     ok "Done. Reboot and verify with:"

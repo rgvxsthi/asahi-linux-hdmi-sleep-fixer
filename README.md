@@ -380,7 +380,7 @@ offers to `makepkg -si`. The PKGBUILD pins its own upstream tag and Arch's
 packaging handles the install, which is more reliable than reimplementing it.
 
 `ALARM_PKGBUILDS_DIR` sets the checkout location (default `~/PKGBUILDs`).
-`PATCHES` and `ASSUME_YES` behave as they do on Fedora. `SKIP_PATCHES=1` leaves nothing for the script to do and it says so and exits. Unlike the Fedora path, patches are staged without a pre-check, so one that does not apply fails inside `makepkg` rather than being skipped.
+`PATCHES`, `ASSUME_YES` and `NOTCH` behave as they do on Fedora. `SKIP_PATCHES=1` leaves nothing for the script to do and it says so and exits. Unlike the Fedora path, patches are staged without a pre-check, so one that does not apply fails inside `makepkg` rather than being skipped.
 
 **What is verified, and what is not.** The patch applies with `patch -Np1`
 against `AsahiLinux/linux` tag `asahi-7.1.5-2`, which is what ALARM's
@@ -390,6 +390,14 @@ PKGBUILD and leaves it parsing correctly. **`makepkg`, mkinitcpio and ALARM's
 boot wiring are untested** — this was developed on Fedora. The script says so
 when it runs. Your existing kernel package stays installed unless `makepkg -si`
 succeeds. Reports welcome.
+
+### The notch argument on ALARM
+
+The `show_notch` question is asked there too, after `makepkg -si` succeeds, but it is answered differently because ALARM's boot wiring is different. There is no `grubby` on Arch and no per-kernel boot entry to write: the GRUB menu is generated from `/etc/default/grub` by `update-grub` (from `asahi-scripts`), and ALARM's `linux-asahi` keeps the kernel image inside `/usr/lib/modules/<version>/` rather than as `/boot/vmlinuz-<version>`. So the argument goes onto `GRUB_CMDLINE_LINUX_DEFAULT` (or `GRUB_CMDLINE_LINUX`, whichever is there as a quoted assignment), and the menu is regenerated afterwards — without that last step the file changes nothing the machine actually boots.
+
+Which spelling it uses is decided the same way as on Fedora, from the newest installed kernel's module tree. ALARM's `linux-asahi` is on the same 7.1 series as Fedora Asahi, so in practice that is `appledrm.show_notch=1`. A `/etc/default/grub` with no quoted assignment to edit is reported and left alone rather than rewritten by regex.
+
+The uninstaller knows about that location too, so it takes the argument off `/etc/default/grub` and regenerates the menu on a machine with no `grubby`. **Like the rest of the ALARM path, this is untested on real hardware** — it was exercised against a stand-in `/etc/default/grub` and a stand-in `update-grub`, not on an Arch install.
 
 ### Getting fairydust (USB-C DisplayPort) on ALARM
 

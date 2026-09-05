@@ -1007,30 +1007,36 @@ remove_notch_arg() {
     # the bare name removes it whatever the value and however many times it
     # appears. Read update_args() in /usr/bin/grubby, which is a shell script.
     local names="appledrm.show_notch apple_dcp.show_notch"
+    local grub_default="/etc/default/grub"
     local line kernel entries new failed=0
     local -a paths=()
 
-    command -v grubby >/dev/null 2>&1 || return 0
+    # Fedora keeps the argument on each boot entry, reachable with grubby.
+    # ALARM has neither, and keeps it in /etc/default/grub, from which the
+    # menu is generated. Both are looked for, because either script may have
+    # been the one that put it there.
+    if command -v grubby >/dev/null 2>&1; then
+        entries="$(sudo grubby --info=ALL 2>/dev/null || true)"
+        kernel=""
+        while IFS= read -r line; do
+            case "$line" in
+                kernel=*)
+                    kernel="${line#kernel=}"
+                    kernel="${kernel//\"/}"
+                    ;;
+                args=*)
+                    [[ -n "$kernel" ]] || continue
+                    case "$line" in *show_notch*) paths+=("$kernel") ;; esac
+                    kernel=""
+                    ;;
+            esac
+        done <<< "$entries"
+    fi
 
-    entries="$(sudo grubby --info=ALL 2>/dev/null || true)"
-    kernel=""
-    while IFS= read -r line; do
-        case "$line" in
-            kernel=*)
-                kernel="${line#kernel=}"
-                kernel="${kernel//\"/}"
-                ;;
-            args=*)
-                [[ -n "$kernel" ]] || continue
-                case "$line" in *show_notch*) paths+=("$kernel") ;; esac
-                kernel=""
-                ;;
-        esac
-    done <<< "$entries"
-
-    local in_cmdline=0
+    local in_cmdline=0 in_default=0
     [[ -f /etc/kernel/cmdline ]] && grep -q 'show_notch' /etc/kernel/cmdline && in_cmdline=1
-    [[ ${#paths[@]} -gt 0 || "$in_cmdline" == "1" ]] || return 0
+    [[ -f "$grub_default" ]] && grep -q 'show_notch' "$grub_default" && in_default=1
+    [[ ${#paths[@]} -gt 0 || "$in_cmdline" == "1" || "$in_default" == "1" ]] || return 0
 
     echo ""
     echo "  The kernel command line carries a show_notch argument, which lets"
@@ -1079,7 +1085,7 @@ remove_notch_arg() {
     # merely ENDING in appledrm.show_notch=... would be cut in half and leave
     # a fragment on the command line.
     if [[ "$in_cmdline" == "1" ]]; then
-        new="$(sed -E 's/(^| )(appledrm|apple_dcp)\.show_notch=[^ ]*//g' /etc/kernel/cmdline)"
+        new="$(sed -E 's/(^| )(appledrm|apple_dcp)\.show_notch=[^ "]*//g' /etc/kernel/cmdline)"
         if [[ -z "${new//[[:space:]]/}" ]]; then
             warn "Removing it would leave /etc/kernel/cmdline empty, and a kernel"
             warn "installed later would then get no command line at all. Left as is."
@@ -1090,6 +1096,31 @@ remove_notch_arg() {
         else
             warn "Could not take it out of /etc/kernel/cmdline. Kernels installed"
             warn "later may still come up with it."
+        fi
+    fi
+
+    # The ALARM home for it. The value class excludes a quote as well as a
+    # space: here the argument sits inside GRUB_CMDLINE_LINUX_DEFAULT="...",
+    # and [^ ]* would eat the closing quote when it is the last one on the
+    # line.
+    if [[ "$in_default" == "1" ]]; then
+        new="$(sed -E 's/(^| )(appledrm|apple_dcp)\.show_notch=[^ "]*//g' "$grub_default")"
+        if printf '%s\n' "$new" | sudo tee "$grub_default" >/dev/null &&
+           ! grep -q 'show_notch' "$grub_default"; then
+            NOTCH_ARG_REMOVED=1
+            ok "show_notch removed from $grub_default"
+
+            # The generated menu is what boots, so the file alone is not enough.
+            if command -v update-grub >/dev/null 2>&1; then
+                sudo update-grub >/dev/null 2>&1 ||
+                    warn "Run 'sudo update-grub' to regenerate the GRUB menu."
+            elif command -v grub-mkconfig >/dev/null 2>&1; then
+                sudo grub-mkconfig -o /boot/grub/grub.cfg >/dev/null 2>&1 ||
+                    warn "Run 'sudo grub-mkconfig -o /boot/grub/grub.cfg'."
+            fi
+        else
+            warn "Could not take it out of $grub_default. Remove it by hand"
+            warn "and run update-grub."
         fi
     fi
 }
