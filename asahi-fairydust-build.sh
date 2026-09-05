@@ -55,6 +55,9 @@ LOCALVERSION="${LOCALVERSION:--hdmifix}"
 JOBS="${JOBS:-$(nproc)}"
 LOG_FILE="$HOME/fairydust-build.log"
 
+# Filled in by offer_notch_arg, read by print_summary.
+NOTCH_ARGS_SET=()
+
 # Prefer the distro Rust toolchain over anything rustup installed.
 #
 # The kernel compiles the Rust core library from source, so rustc and the
@@ -1103,6 +1106,7 @@ update_grub() {
 
     ok "GRUB updated (5-second menu timeout)"
 
+    offer_notch_arg
     offer_default_kernel
 }
 
@@ -1184,6 +1188,198 @@ offer_default_kernel() {
     fi
 }
 
+# --- Which show_notch argument does this kernel take? ---
+#
+# The argument is a module parameter, so it is named after the module, and the
+# module was renamed: apple_dcp on the 6.18 kernels and earlier, appledrm
+# since. A machine with one of each installed needs one of each argument, so
+# this reads the name off the module tree of the kernel in question rather
+# than assuming the newer one.
+#
+# Prints the argument, or returns 1 when the kernel cannot be identified, in
+# which case the caller leaves that boot entry alone. Guessing is worse than
+# skipping here: Fedora's rescue entry is /boot/vmlinuz-0-rescue-<machine-id>,
+# which has no module tree and no version to read.
+notch_param_for() {
+    local kver="$1" moddir="/usr/lib/modules/$1" name base
+
+    for name in appledrm apple_dcp; do
+        if grep -qs "/$name\.ko" "$moddir/modules.dep" "$moddir/modules.builtin"; then
+            echo "$name.show_notch=1"
+            return 0
+        fi
+    done
+
+    # No module tree to read: a kernel installed without one, or one whose
+    # files were removed from under its boot entry. Fall back to the version,
+    # but only when the name actually starts with one. The rename landed
+    # between 6.18 and 7.1, so anything below 6.19 gets the old name.
+    base="${kver%%-*}"
+    [[ "$base" =~ ^[0-9]+\.[0-9]+ ]] || return 1
+
+    if [[ "$base" != "6.19" ]] &&
+       [[ "$(printf '%s\n6.19\n' "$base" | sort -V | head -1)" == "$base" ]]; then
+        echo "apple_dcp.show_notch=1"
+    else
+        echo "appledrm.show_notch=1"
+    fi
+}
+
+# --- Use the screen area beside the notch? ---
+#
+# Macs with a notch (MacBook Pro 14"/16", MacBook Air 13"/15" M2 and later)
+# come up with the panel cropped to below it unless the display driver is told
+# to use the whole thing. That is a kernel command line argument rather than a
+# config symbol, so the build cannot bake it in: it has to be written onto the
+# boot entries afterwards.
+#
+# Written to every entry rather than only the one just built, because it is a
+# property of the machine and not of this kernel. Each entry gets the argument
+# its own kernel understands. A Mac with no notch ignores it.
+#
+#   NOTCH=1   add the argument without asking
+#   NOTCH=0   leave the kernel command line alone
+offer_notch_arg() {
+    local line kernel kver arg i failed=0 identified=0
+    local -a paths=() args=() kvers=()
+
+    command -v grubby >/dev/null 2>&1 || return 0
+
+    local entries
+    entries="$(sudo grubby --info=ALL 2>/dev/null || true)"
+    [[ -n "$entries" ]] || return 0
+
+    # grubby prints kernel= before args= within each entry, so an args= line
+    # belongs to the kernel= last seen. Entries that already carry the right
+    # argument are dropped here and never mentioned again.
+    kernel=""
+    while IFS= read -r line; do
+        case "$line" in
+            kernel=*)
+                kernel="${line#kernel=}"
+                kernel="${kernel//\"/}"
+                ;;
+            args=*)
+                [[ -n "$kernel" ]] || continue
+                kver="${kernel##*/vmlinuz-}"
+                if ! arg="$(notch_param_for "$kver")"; then
+                    # Rescue entries and anything else with no kernel to
+                    # inspect. Left alone rather than guessed at.
+                    kernel=""
+                    continue
+                fi
+                identified=$((identified + 1))
+                case " ${line#args=} " in
+                    *"$arg"*) ;;
+                    *) paths+=("$kernel"); args+=("$arg"); kvers+=("$kver") ;;
+                esac
+                kernel=""
+                ;;
+        esac
+    done <<< "$entries"
+
+    # /etc/kernel/cmdline is what kernels installed later read, and grubby
+    # only writes through to it under --update-kernel=ALL, which this does not
+    # use. So the file is this script's job, and it is decided here rather
+    # than after the loop: entries that are all up to date must not stop the
+    # file from being fixed.
+    local built cmdline_arg="" cmdline_todo=0
+    if [[ -f /etc/kernel/cmdline ]]; then
+        built="${KVER:-}"
+        [[ -n "$built" ]] ||
+            built="$(cd "$CLONE_DIR" && make -s kernelrelease 2>/dev/null || true)"
+        # An unguarded assignment would end the build here under set -e, since
+        # notch_param_for returns non-zero for a kernel it cannot identify.
+        if cmdline_arg="$(notch_param_for "$built")" &&
+           ! grep -Fq "$cmdline_arg" /etc/kernel/cmdline; then
+            cmdline_todo=1
+        fi
+    fi
+
+    if [[ ${#paths[@]} -eq 0 && "$cmdline_todo" -eq 0 ]]; then
+        if [[ "$identified" -eq 0 ]]; then
+            info "No boot entry matched an installed kernel, so the kernel"
+            info "command line was left alone."
+        else
+            info "Boot entries already carry the show_notch argument"
+        fi
+        return 0
+    fi
+
+    echo ""
+    echo "  Macs with a notch hide the screen area either side of it unless"
+    echo "  the display driver is told to use the full panel. That is a kernel"
+    echo "  command line setting, so it is not part of the kernel just built."
+    echo ""
+    if [[ ${#paths[@]} -gt 0 ]]; then
+        echo "  The argument is named after the driver, and the driver was renamed"
+        echo "  (apple_dcp became appledrm), so it differs per kernel:"
+        for i in "${!paths[@]}"; do
+            echo "    ${kvers[$i]}  ->  ${args[$i]}"
+        done
+        echo ""
+    fi
+    if [[ "$cmdline_todo" -eq 1 ]]; then
+        echo "  /etc/kernel/cmdline gets $cmdline_arg as well, so"
+        echo "  kernels installed later keep it."
+        echo ""
+    fi
+    echo "  Kernels and Macs that do not know it ignore it. To undo one later,"
+    echo "  name it without the value, which is what grubby matches on:"
+    echo "    sudo grubby --remove-args=appledrm.show_notch --update-kernel=ALL"
+    echo ""
+
+    case "${NOTCH:-}" in
+        1) info "NOTCH=1, adding the show_notch argument" ;;
+        0) info "NOTCH=0, leaving the kernel command line alone"; return 0 ;;
+        *)
+            if ! confirm_default_yes "Show the screen area beside the notch?"; then
+                info "Kernel command line left alone. Pass NOTCH=1 to add it later."
+                return 0
+            fi
+            ;;
+    esac
+
+    for i in "${!paths[@]}"; do
+        if ! sudo grubby --args="${args[$i]}" --update-kernel="${paths[$i]}" >/dev/null 2>&1; then
+            warn "Could not write ${args[$i]} to ${kvers[$i]}. By hand:"
+            warn "  sudo grubby --args=${args[$i]} --update-kernel=${paths[$i]}"
+            failed=1
+            continue
+        fi
+
+        # Read it back, for the same reason the boot default is read back:
+        # grubby reports success for a write that did not land.
+        if sudo grubby --info="${paths[$i]}" 2>/dev/null | grep -F -- "${args[$i]}" >/dev/null; then
+            NOTCH_ARGS_SET+=("${kvers[$i]}: ${args[$i]}")
+            ok "${kvers[$i]} now boots with ${args[$i]}"
+        else
+            warn "${kvers[$i]} still has no ${args[$i]} after writing it."
+            warn "Check with: sudo grubby --info=${paths[$i]}"
+            failed=1
+        fi
+    done
+
+    [[ "$failed" == "0" ]] || warn "Some entries were left without the argument."
+
+    # Only an existing file is edited. Creating one would hand every future
+    # kernel's command line to a build script that has no business owning it,
+    # and a machine without the file inherits the running kernel's line, which
+    # by then has the argument anyway.
+    if [[ "$cmdline_todo" -eq 1 ]]; then
+        if sudo sed -i "1s|\$| $cmdline_arg|" /etc/kernel/cmdline &&
+           grep -Fq "$cmdline_arg" /etc/kernel/cmdline; then
+            NOTCH_ARGS_SET+=("/etc/kernel/cmdline: $cmdline_arg")
+            ok "Added $cmdline_arg to /etc/kernel/cmdline for future kernels too"
+        else
+            # An empty file is the way this fails quietly: 1s matches no line,
+            # sed exits 0, and nothing is written.
+            warn "Could not add $cmdline_arg to /etc/kernel/cmdline. Kernels"
+            warn "installed later may come up without it."
+        fi
+    fi
+}
+
 # --- Step 8: Setup Typec Module Autoloading ---
 setup_modules() {
     echo ""
@@ -1213,6 +1409,12 @@ print_summary() {
     if [[ ${#APPLIED_PATCHES[@]} -gt 0 ]]; then
         echo "  Patches in this kernel:"
         printf '    - %s\n' "${APPLIED_PATCHES[@]}"
+        echo ""
+    fi
+    if [[ ${#NOTCH_ARGS_SET[@]} -gt 0 ]]; then
+        echo "  Notch argument added to the kernel command line:"
+        printf '    - %s\n' "${NOTCH_ARGS_SET[@]}"
+        echo "  (undo with: sudo grubby --remove-args=<argument> --update-kernel=ALL)"
         echo ""
     fi
     echo "  NEXT STEPS:"

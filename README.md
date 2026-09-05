@@ -185,6 +185,8 @@ Which kernel should GRUB boot by default?
 Boot which by default? [number, or Enter to keep 7.1.6-400.asahi.fc44.aarch64+16k]:
 ```
 
+If the kernel command line carries a `show_notch` argument, it asks whether to take that off too — a plain y/N, defaulting to keeping it, because it is a display setting rather than something the removed kernel needs. Both spellings go (`appledrm.show_notch` and the older `apple_dcp.show_notch`), from every boot entry and from `/etc/kernel/cmdline`. They are named without a value, because `grubby` removes a `name=value` argument only on an exact match, so `--remove-args=appledrm.show_notch=1` would walk straight past a `show_notch=0`. The file is left alone if taking the argument out would empty it. `NOTCH=0` removes it without asking, `NOTCH=1` keeps it, and `ASSUME_YES=1` removes it like everything else here.
+
 Then the build leftovers are offered separately, each with its size, including when there was no kernel left to remove:
 
 ```
@@ -221,6 +223,7 @@ Most behaviour is environment-overridable:
 | `STOCK_KERNELS` | *(asks)* | Uninstaller only. `old`, `none`, or a comma-separated list of stock kernel versions to remove with `dnf` |
 | `CLEANUP` | *(asks)* | Uninstaller only. `all`, `none`, or keys from `source,log,pkgbuilds,legacy` |
 | `SET_DEFAULT` | *(asks)* | Which kernel GRUB boots. Build script: `1` / `0`. Uninstaller: a version, or `keep` |
+| `NOTCH` | *(asks)* | The `show_notch` kernel argument. Build script: `1` adds it, `0` skips, default yes. Uninstaller: `0` removes it, `1` keeps it, default keep |
 | `NO_REBOOT` | `0` | Never reboot, even unattended |
 | `SKIP_PATCHES` | `0` | Build the branch unpatched |
 | `PATCHES` | *(asks)* | Comma-separated filename substrings, case-insensitive |
@@ -469,6 +472,7 @@ Beyond the HDMI patch, this fork carries build fixes that have been offered back
 
 - Sets `GRUB_TIMEOUT_STYLE=menu` and `GRUB_TIMEOUT=5` in `/etc/default/grub`, so the boot menu appears. The uninstaller does not restore the previous values.
 - Asks, at the end of the build, whether GRUB should boot the new kernel by default. It defaults to **no**, and `ASSUME_YES=1` answers no: a kernel that has never been booted is the wrong thing to make automatic on a machine nobody is sitting in front of. `SET_DEFAULT=1` opts in, `SET_DEFAULT=0` opts out without asking. Say yes and the summary tells you which kernel to pick from the GRUB menu if the new one does not come up.
+- Asks whether to put a `show_notch` argument on the kernel command line, which lets the display use the panel area either side of the notch. It defaults to **yes** and is written to every boot entry, not only the one just built: it is a property of the machine rather than of this kernel, and kernels that do not know the parameter ignore it. The argument is named after the display driver, and the driver was renamed, so each entry gets the one its own kernel understands — `apple_dcp.show_notch=1` on 6.18 and earlier, `appledrm.show_notch=1` since. The name is read off `/usr/lib/modules/<version>` rather than guessed from the version number, with the version used only when that tree is gone — and an entry that matches no installed kernel at all, such as Fedora's `0-rescue-*`, is left alone rather than guessed at. `NOTCH=1` / `NOTCH=0` answers the question without asking. Each entry is written on its own rather than with `grubby --update-kernel=ALL`, which is not just a loop: `ALL` also creates `/etc/kernel/cmdline` when there is none, seeded from whichever entry happens to be last, and rewrites `GRUB_CMDLINE_LINUX` and the grubenv `kernelopts`. `/etc/kernel/cmdline` is then updated by the script itself, but only when the file already exists, so kernels installed later keep the argument. The uninstaller offers to take it all back off.
 - Points `/usr/src/linux` at the kernel source tree.
 - Enables `CONFIG_RCU_LAZY` (battery) and `CONFIG_SCHED_BORE` in the config regardless of whether you accepted the BORE patch. `SCHED_BORE` has no effect without that patch.
 - Requires working ICMP: it aborts if `ping github.com` fails, even where HTTPS would work.

@@ -28,6 +28,7 @@
 #   KERNELS="7.1.5-hdmifix+" CLEANUP=log ./asahi-fairydust-uninstall.sh
 #   KERNELS=all ALLOW_RUNNING=1 ASSUME_YES=1 ./asahi-fairydust-uninstall.sh
 #   STOCK_KERNELS=old ASSUME_YES=1 ./asahi-fairydust-uninstall.sh
+#   KERNELS=all NOTCH=1 ./asahi-fairydust-uninstall.sh   # keep show_notch
 # =============================================================================
 
 set -e
@@ -984,6 +985,118 @@ apply_default_kernel() {
 
 choose_default_kernel
 
+# --- Take the notch argument back off the kernel command line ---
+#
+# The build script offers to add show_notch to every boot entry, so the
+# uninstaller offers to take it off. The argument is a module parameter and
+# the module was renamed (apple_dcp became appledrm), so both spellings go,
+# whichever one a given entry ended up with.
+#
+# Left alone by default, and asked as a plain y/N: it is a display setting
+# rather than something the removed kernel needs, and someone uninstalling one
+# kernel out of several may well want to keep it. ASSUME_YES removes it, the
+# same as it removes everything else here.
+#
+#   NOTCH=0   remove the argument without asking
+#   NOTCH=1   keep the argument without asking
+NOTCH_ARG_REMOVED=0
+remove_notch_arg() {
+    # Bare names, with no =value. grubby removes an argument written as
+    # name=value only on an exact match and only once per entry, so
+    # --remove-args=appledrm.show_notch=1 leaves a show_notch=0 in place;
+    # the bare name removes it whatever the value and however many times it
+    # appears. Read update_args() in /usr/bin/grubby, which is a shell script.
+    local names="appledrm.show_notch apple_dcp.show_notch"
+    local line kernel entries new failed=0
+    local -a paths=()
+
+    command -v grubby >/dev/null 2>&1 || return 0
+
+    entries="$(sudo grubby --info=ALL 2>/dev/null || true)"
+    kernel=""
+    while IFS= read -r line; do
+        case "$line" in
+            kernel=*)
+                kernel="${line#kernel=}"
+                kernel="${kernel//\"/}"
+                ;;
+            args=*)
+                [[ -n "$kernel" ]] || continue
+                case "$line" in *show_notch*) paths+=("$kernel") ;; esac
+                kernel=""
+                ;;
+        esac
+    done <<< "$entries"
+
+    local in_cmdline=0
+    [[ -f /etc/kernel/cmdline ]] && grep -q 'show_notch' /etc/kernel/cmdline && in_cmdline=1
+    [[ ${#paths[@]} -gt 0 || "$in_cmdline" == "1" ]] || return 0
+
+    echo ""
+    echo "  The kernel command line carries a show_notch argument, which lets"
+    echo "  the display use the area either side of the notch. It is not tied"
+    echo "  to the kernels being removed, so it can stay."
+    echo ""
+
+    case "${NOTCH:-}" in
+        0) info "NOTCH=0, removing the show_notch argument" ;;
+        1) info "NOTCH=1, leaving the show_notch argument in place"; return 0 ;;
+        *)
+            if ! confirm "Remove the show_notch argument from the kernel command line?"; then
+                info "show_notch left in place."
+                return 0
+            fi
+            ;;
+    esac
+
+    # One entry at a time rather than --update-kernel=ALL. ALL is not just a
+    # loop in grubby: it also creates /etc/kernel/cmdline when there is none,
+    # seeded from whichever entry happens to be last, and rewrites
+    # GRUB_CMDLINE_LINUX and the grubenv kernelopts. An uninstaller taking one
+    # argument off has no business leaving any of that behind.
+    for kernel in "${paths[@]}"; do
+        if sudo grubby --remove-args="$names" --update-kernel="$kernel" >/dev/null 2>&1; then
+            NOTCH_ARG_REMOVED=1
+        else
+            warn "Could not remove it from $kernel. By hand:"
+            warn "  sudo grubby --remove-args=\"$names\" --update-kernel=$kernel"
+            failed=1
+        fi
+    done
+
+    # Read back, the same as the boot default is read back.
+    if sudo grubby --info=ALL 2>/dev/null | grep -q '^args=.*show_notch'; then
+        warn "Some boot entries still carry a show_notch argument."
+        warn "Check with: sudo grubby --info=ALL | grep args="
+        failed=1
+    elif [[ ${#paths[@]} -gt 0 && "$failed" == "0" ]]; then
+        ok "show_notch removed from ${#paths[@]} boot entries"
+    fi
+
+    # Kernels installed later take their command line from this file, so the
+    # argument comes back on the next kernel if it is left here. The pattern
+    # is anchored at a space or the start of the line: unanchored, a token
+    # merely ENDING in appledrm.show_notch=... would be cut in half and leave
+    # a fragment on the command line.
+    if [[ "$in_cmdline" == "1" ]]; then
+        new="$(sed -E 's/(^| )(appledrm|apple_dcp)\.show_notch=[^ ]*//g' /etc/kernel/cmdline)"
+        if [[ -z "${new//[[:space:]]/}" ]]; then
+            warn "Removing it would leave /etc/kernel/cmdline empty, and a kernel"
+            warn "installed later would then get no command line at all. Left as is."
+        elif printf '%s\n' "$new" | sudo tee /etc/kernel/cmdline >/dev/null &&
+             ! grep -q 'show_notch' /etc/kernel/cmdline; then
+            NOTCH_ARG_REMOVED=1
+            ok "show_notch removed from /etc/kernel/cmdline"
+        else
+            warn "Could not take it out of /etc/kernel/cmdline. Kernels installed"
+            warn "later may still come up with it."
+        fi
+    fi
+}
+
+remove_notch_arg
+
+
 # m1n1 is only put back on stock when the last of our kernels goes. It boots
 # one set of device trees, and a partial removal means a kernel of ours is
 # still installed and still expects the DTBs it was built with. Resetting m1n1
@@ -1268,6 +1381,9 @@ if [[ ${#SELECTED_KVERS[@]} -gt 0 ]]; then
 fi
 if [[ ${#REMOVED_STOCK[@]} -gt 0 ]]; then
     echo "  Removed with dnf: ${REMOVED_STOCK[*]}"
+fi
+if [[ "$NOTCH_ARG_REMOVED" == "1" ]]; then
+    echo "  Kernel command line: show_notch removed"
 fi
 if [[ "$FULL_REMOVAL" == "1" && "$M1N1_RESTORED" == "1" ]]; then
     if [[ "$RUNNING_SELECTED" == "1" ]]; then
