@@ -125,22 +125,26 @@ KVER_PATTERN="$(printf '%s\n' $KERNEL_SUFFIXES \
 #
 # Where no package manager can be queried there is nothing to fall back on but
 # the name, so say so rather than pretending to a certainty we do not have.
+# Every manager present is asked, not the first one found. Picking one was a
+# real hole: an Arch machine that happens to have rpm installed took the rpm
+# branch, every rpm -qf came back "not owned", and the ownership shield below
+# silently passed everything through as ours.
 PKG_QUERY=""
-if command -v rpm >/dev/null 2>&1; then
-    PKG_QUERY="rpm"
-elif command -v pacman >/dev/null 2>&1; then
-    PKG_QUERY="pacman"
-fi
+command -v rpm    >/dev/null 2>&1 && PKG_QUERY="rpm"
+command -v pacman >/dev/null 2>&1 && PKG_QUERY="${PKG_QUERY:+$PKG_QUERY }pacman"
 
 kernel_is_packaged() {
     local k="$1" p
+    local q
     [[ -n "$PKG_QUERY" ]] || return 1
     for p in "/boot/vmlinuz-$k" "/usr/lib/modules/$k"; do
         [[ -e "$p" ]] || continue
-        case "$PKG_QUERY" in
-            rpm)    rpm -qf "$p"    >/dev/null 2>&1 && return 0 ;;
-            pacman) pacman -Qo "$p" >/dev/null 2>&1 && return 0 ;;
-        esac
+        for q in $PKG_QUERY; do
+            case "$q" in
+                rpm)    rpm -qf "$p"    >/dev/null 2>&1 && return 0 ;;
+                pacman) pacman -Qo "$p" >/dev/null 2>&1 && return 0 ;;
+            esac
+        done
     done
     return 1
 }
@@ -163,7 +167,8 @@ echo ""
 # kernel half-removed by an interrupted run leaves files in one and not the
 # other, and those leftovers are exactly what someone re-running this script
 # needs to see rather than a report of "nothing to uninstall".
-declare -a CUSTOM_KVERS=() STOCK_KVERS=() KEPT_CUSTOM=() SHIELDED_KVERS=()
+declare -a CUSTOM_KVERS=()
+NO_MODULES_KVERS=() STOCK_KVERS=() KEPT_CUSTOM=() SHIELDED_KVERS=()
 
 # A kernel is only a removal candidate when BOTH tests agree: its name matches
 # a suffix we build with, AND no package owns it. Either test on its own gets
@@ -189,6 +194,18 @@ collect_kernels() {
         # the prompt, and in what gets pointed at once it is gone.
         if [[ ! "$k" =~ $KVER_PATTERN ]]; then
             STOCK_KVERS+=("$k")
+        elif [[ ! -d "/usr/lib/modules/$k" ]]; then
+            # A boot image with no module directory was never installed by the
+            # build script, which always lands both. Arch is where this bites:
+            # its kernel packages ship nothing under /boot, and mkinitcpio's
+            # hook writes /boot/vmlinuz-<pkgbase> afterwards, so that file is
+            # owned by no package and reads as "matches the name, nobody owns
+            # it" — the exact signature of one of ours. Removing it deletes
+            # what GRUB boots while every real kernel stays installed, which
+            # the "a stock kernel survives" test below cannot catch, because
+            # the real kernels do survive.
+            STOCK_KVERS+=("$k")
+            NO_MODULES_KVERS+=("$k")
         elif kernel_is_packaged "$k"; then
             # Name says ours, the package database says otherwise. The package
             # database wins, and this is loud rather than silent because it
@@ -208,6 +225,20 @@ RUNNING_IS_CUSTOM=0
 case " ${CUSTOM_KVERS[*]} " in
     *" $RUNNING_KVER "*) RUNNING_IS_CUSTOM=1 ;;
 esac
+
+if [[ ${#NO_MODULES_KVERS[@]} -gt 0 ]]; then
+    warn "These match '$KVER_PATTERN' but have no /usr/lib/modules directory,"
+    warn "so they are NOT removable here:"
+    for k in "${NO_MODULES_KVERS[@]}"; do
+        warn "  $k"
+    done
+    warn "A kernel this script installed has both. With only a boot file there"
+    warn "is no way to tell one of ours from a boot file the distribution's own"
+    warn "tooling wrote: on Arch, /boot/vmlinuz-<name> comes from mkinitcpio"
+    warn "rather than from a package, and removing it stops the machine booting."
+    warn "If it is a leftover from an interrupted removal, delete it by hand."
+    echo ""
+fi
 
 if [[ ${#SHIELDED_KVERS[@]} -gt 0 ]]; then
     warn "These kernels match '$KVER_PATTERN' but are owned by a package, so"
@@ -379,7 +410,7 @@ collect_stock_candidates() {
     local k pkg
     # rpm identifies them and dnf removes them; without both, this whole
     # section stays out of the way. pacman has no installonly kernels to offer.
-    [[ "$PKG_QUERY" == "rpm" ]] || return 0
+    case " $PKG_QUERY " in *" rpm "*) ;; *) return 0 ;; esac
     command -v dnf >/dev/null 2>&1 || return 0
     for k in "${STOCK_KVERS[@]}"; do
         [[ "$k" == "$RUNNING_KVER" ]] && continue
