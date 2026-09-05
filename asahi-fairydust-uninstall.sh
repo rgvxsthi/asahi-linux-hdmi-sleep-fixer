@@ -15,8 +15,9 @@
 # running kernel lives in memory, not in /boot — but any module not already
 # loaded stops being loadable until you reboot onto something else.
 #
-# A second menu offers the older STOCK kernels, which are dnf packages and are
-# removed with dnf. The running kernel and the newest stock kernel are never
+# A second menu offers the older STOCK kernels. On Fedora those are dnf
+# packages and are removed with dnf; where there is no dnf the section stays
+# out of the way. The running kernel and the newest stock kernel are never
 # offered there, so a stock kernel always survives.
 #
 # USAGE:
@@ -160,6 +161,25 @@ RUNNING_KVER="$(uname -r)"
 info "Current kernel: $RUNNING_KVER"
 info "Looking for kernels matching: $KVER_PATTERN"
 echo ""
+
+# Said once, up front, on a machine this script cannot serve. Everything below
+# assumes the Fedora shape: a kernel installed by `make install`, owned by no
+# package, sitting in /boot next to its module tree. The ALARM path of the
+# build script produces a pacman package instead, with the same name and
+# version as the stock one, so there is nothing here to tell apart or take out.
+# Keyed on the distro rather than on which query tools happen to be installed:
+# rpm on an Arch box is unusual but not impossible, and it would otherwise
+# silence this.
+if command -v pacman >/dev/null 2>&1 && [[ ! -f /etc/fedora-release ]]; then
+        warn "This uninstaller is written for Fedora Asahi Remix."
+        warn "On Arch, the kernel this repo builds IS the linux-asahi package,"
+        warn "with the same version string as the stock one. Reinstall the"
+        warn "stock package to undo the build:"
+        warn "    sudo pacman -S linux-asahi"
+        warn "What does work here: the show_notch argument, the boot default,"
+        warn "and the build leftovers."
+        echo ""
+fi
 
 # --- Find every installed kernel, ours and stock alike ---
 #
@@ -902,11 +922,28 @@ fi
 # allowed to prevent it being fixed.
 if [[ ${#SELECTED_KVERS[@]} -gt 0 || ${#REMOVED_STOCK[@]} -gt 0 ]]; then
     info "Regenerating GRUB..."
-    if sudo grub2-mkconfig -o /boot/grub2/grub.cfg; then
+    # Fedora ships grub2-mkconfig and /boot/grub2; Arch ships grub-mkconfig and
+    # /boot/grub, with update-grub from asahi-scripts wrapping it. Naming only
+    # the Fedora pair told anyone else to run a command they do not have, and
+    # left their menu pointing at kernels that are gone.
+    if command -v grub2-mkconfig >/dev/null 2>&1; then
+        GRUB_REGEN=(sudo grub2-mkconfig -o /boot/grub2/grub.cfg)
+    elif command -v update-grub >/dev/null 2>&1; then
+        GRUB_REGEN=(sudo update-grub)
+    elif command -v grub-mkconfig >/dev/null 2>&1; then
+        GRUB_REGEN=(sudo grub-mkconfig -o /boot/grub/grub.cfg)
+    else
+        GRUB_REGEN=()
+    fi
+
+    if [[ ${#GRUB_REGEN[@]} -eq 0 ]]; then
+        warn "No GRUB config generator found. The removed kernels may still be"
+        warn "listed in the boot menu."
+    elif "${GRUB_REGEN[@]}"; then
         ok "GRUB regenerated"
     else
-        warn "grub2-mkconfig failed. The removed kernels may still be listed in"
-        warn "the boot menu. Run 'sudo grub2-mkconfig -o /boot/grub2/grub.cfg'."
+        warn "${GRUB_REGEN[*]} failed. The removed kernels may still be listed"
+        warn "in the boot menu. Run it by hand once the cause is fixed."
     fi
 fi
 
@@ -1252,10 +1289,22 @@ add_leftover() {
             tree) [[ -d "$path" ]] \
                 && { [[ -f "$path/Makefile" || -f "$path/.config" || -d "$path/.git" ]] \
                      || sane=0; } || sane=0 ;;
-            # PKGBUILDs is a git checkout of build recipes.
-            pkgtree) [[ -d "$path" ]] \
-                && { [[ -d "$path/.git" ]] || compgen -G "$path/*/PKGBUILD" >/dev/null \
-                     || sane=0; } || sane=0 ;;
+            # PKGBUILDs is a git checkout of build recipes — but the default
+            # path is ~/PKGBUILDs, which is exactly where an Arch user keeps
+            # their own. "Contains a .git or any */PKGBUILD" matched those too,
+            # and offered to delete a personal collection recursively. So the
+            # tree has to identify itself as the one this script clones: the
+            # asahi-alarm remote, or the package directory it goes there for.
+            pkgtree)
+                if [[ ! -d "$path" ]]; then
+                    sane=0
+                elif [[ "$(git -C "$path" remote get-url origin 2>/dev/null)" == *asahi-alarm/PKGBUILDs* ]]; then
+                    :
+                elif [[ -f "$path/linux-asahi/PKGBUILD" ]]; then
+                    :
+                else
+                    sane=0
+                fi ;;
             file) [[ -f "$path" ]] || sane=0 ;;
         esac
     fi

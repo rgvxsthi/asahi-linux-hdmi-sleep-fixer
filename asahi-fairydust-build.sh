@@ -1846,6 +1846,13 @@ The PKGBUILD layout has probably changed. Add it to source=() by hand and re-run
     ok "Done. Reboot and verify with:"
     echo "    uname -r"
     echo "    cat /sys/class/drm/card*-HDMI-A-1/status   # before and after a suspend"
+    echo ""
+    echo "  TO REVERT: this replaced the linux-asahi package at the same"
+    echo "  version, so the stock kernel files are gone rather than sitting"
+    echo "  beside it. Reinstall the package to undo it:"
+    echo "      sudo pacman -S linux-asahi"
+    echo "  The uninstaller cannot do this for you: what it removes are kernels"
+    echo "  installed by hand, and this one belongs to pacman."
 }
 
 # --- Main ---
