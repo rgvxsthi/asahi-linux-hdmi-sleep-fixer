@@ -230,6 +230,7 @@ Most behaviour is environment-overridable:
 | `UPDATE_SOURCE` | `1` | Set to `0` to never refresh an existing checkout |
 | `SKIP_VERSION_LOOKUP` | `0` | Set to `1` to skip the live kernel-version lookup in the branch menu |
 | `FAIRYDUST_REFRESH` | `1` | ALARM only. `0` uses the shipped patch snapshot instead of refetching |
+| `FAIRYDUST_MAX_FILES` | `50` | ALARM only. Above this many files a refetched range is rejected as no longer a delta |
 | `ALARM_PKGBUILDS_DIR` | `$HOME/PKGBUILDs` | ALARM only. Where to clone `asahi-alarm/PKGBUILDs` |
 | `RUST_LIB_SRC` | *(autodetected)* | Path to the Rust library source, if autodetection picks wrong |
 
@@ -382,10 +383,11 @@ packaging handles the install, which is more reliable than reimplementing it.
 `ALARM_PKGBUILDS_DIR` sets the checkout location (default `~/PKGBUILDs`).
 `PATCHES`, `ASSUME_YES` and `NOTCH` behave as they do on Fedora. `SKIP_PATCHES=1` leaves nothing for the script to do and it says so and exits. Unlike the Fedora path, patches are staged without a pre-check, so one that does not apply fails inside `makepkg` rather than being skipped.
 
-**What is verified, and what is not.** The patch applies with `patch -Np1`
-against `AsahiLinux/linux` tag `asahi-7.1.5-2`, which is what ALARM's
-`linux-asahi` currently builds, and the unfixed `dcp_platform_resume()` is
-present at that tag. The `source=()` rewrite was tested against the real
+**What is verified, and what is not.** The patches apply against
+`AsahiLinux/linux` tag `asahi-7.1.12-1`, and the unfixed
+`dcp_platform_resume()` is still present there — the fix has not landed
+upstream. ALARM's `linux-asahi` currently pins the older `asahi-7.1.6-1`, which
+is why the refresh has a size guard: see the section on patch 0003 below. The `source=()` rewrite was tested against the real
 PKGBUILD and leaves it parsing correctly. **`makepkg`, mkinitcpio and ALARM's
 boot wiring are untested** — this was developed on Fedora. The script says so
 when it runs. Your existing kernel package stays installed unless `makepkg -si`
@@ -405,20 +407,21 @@ ALARM's `linux-asahi` builds the release branch, not `fairydust`, so the HDMI
 fix alone does not give you USB-C DisplayPort output. `patches/0003` closes
 that gap without changing which branch the package builds.
 
-`fairydust` is exactly **14 commits ahead of `asahi-7.1.5-2` and 0 behind**,
+`fairydust` is exactly **11 commits ahead of `asahi-7.1.12-1` and 0 behind**,
 so that delta is self-contained: DTS alt-mode hacks for every supported
-machine, two tipd changes, and one arm64 config fixup that rides along because
-this is a plain range diff rather than a curated selection. Patch 0003 is that
-range, applied the same way as everything else. Accept it at the prompt.
+machine and two tipd changes. Patch 0003 is that range, applied the same way as
+everything else. Accept it at the prompt.
 
 It is also useful on Fedora if you pick the `asahi` branch instead of
 `fairydust`. On a `fairydust` tree it is detected as already applied and
 skipped, so it is safe to leave enabled either way.
 
-On `asahi-wip` it is reported as not applicable and skipped. That branch
-already carries one commit from the range — the arm64 config fixup — so the
-diff is neither wholly absent nor wholly present. Pick `fairydust` if you want
-USB-C DisplayPort output.
+The base is the release **tag**, not the release **branch**, and they are not
+interchangeable. The `asahi` branch trails `fairydust` by whole stable releases
+at times — it was on 7.1.9 against fairydust's 7.1.12 when this was last
+regenerated — and a range taken from the branch then drags in everything
+released in between: `asahi...fairydust` was 851 files where the real delta is
+16.
 
 Caveats, inherited from upstream rather than introduced here:
 
@@ -442,13 +445,22 @@ The file in `patches/` is a fallback used when the tag cannot be determined or
 GitHub is unreachable, and the script says which one it used. `FAIRYDUST_REFRESH=0`
 forces the shipped snapshot.
 
+The refresh refuses a range that is no longer a delta. Once the pinned tag falls
+behind `fairydust` by whole stable releases the compare stops describing the
+USB-C work and starts describing the releases in between — `asahi-7.1.6-1...fairydust`,
+which is what ALARM pins today, is 4398 files and 318k lines. Anything touching
+more than 50 files is rejected in favour of the shipped snapshot rather than
+offered at a prompt, because it cannot apply and agreeing to it helps nobody.
+`FAIRYDUST_MAX_FILES` raises the cap. When the snapshot does not apply either,
+the answer is a newer tag in ALARM's PKGBUILD, not a bigger diff.
+
 The Fedora path never needed this: choosing the `fairydust` branch clones it
 directly, so it is current by construction and patch 0003 self-skips.
 
-Verified: applies to `asahi-7.1.5-2`, coexists with patches 0001 and 0002,
-and reverse-detects as already present on a `fairydust` tree. The snapshot in
-`patches/` was regenerated against that tag, so it currently matches what the
-refresh would fetch. Not boot-tested — see above.
+Verified by applying it: it applies to `asahi-7.1.12-1` and to the `asahi`
+branch, and reverse-detects as already present on `fairydust` — the three states
+the CI job checks. The snapshot in `patches/` matches what the refresh fetches
+for that tag byte for byte. Not boot-tested — see above.
 
 BORE needs more than a patch on ALARM: its kernel `config` has no
 `CONFIG_SCHED_BORE`, so the patch would apply but the feature would compile out.

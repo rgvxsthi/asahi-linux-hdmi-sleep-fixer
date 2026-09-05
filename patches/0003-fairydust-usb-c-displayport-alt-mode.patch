@@ -1,35 +1,34 @@
 From: Asahi Linux contributors <asahi@lists.linux.dev>
-Subject: [PATCH] fairydust: USB-C DisplayPort alt mode (14 commits)
+Subject: [PATCH] fairydust: USB-C DisplayPort alt mode (11 commits)
 X-Summary: USB-C DisplayPort output (the fairydust work)
 X-Who-Needs-It: Only needed if your kernel is built from the release branch. Redundant on the fairydust branch, where it is detected and skipped.
 
-Squashed range asahi-7.1.5-2..fairydust from AsahiLinux/linux, which is
-exactly the delta between the release branch and the fairydust branch:
-14 commits, 0 behind.
+Squashed range asahi-7.1.12-1..fairydust from AsahiLinux/linux, which is
+exactly the delta between the release tag and the fairydust branch:
+11 commits, 0 behind.
 
-  e2566051 fixup! arm64: configs: asahi: Add new configs for v7.1
-  19f8a052 usb: typec: tipd: Track data_status changes for CD321x
-  ecb9073f usb: typec: tipd: HACK: Use drm oob hotplug event
-  e603264b arm64: dts: apple: t8103: Add dp-altmode dts hacks
-  1022ad9c HACK: arm64: dts: apple: t8103: Mark ps_atc1_common as always on
-  94158a16 arm64: dts: apple: t8112: Add dp-altmode dts hacks
-  31186a1d HACK: arm64: dts: apple: t8112: Mark ps_atc1_common as always on
-  05057727 arm64: apple: t8112-j473: Add DP-altmode on typec1
-  ba81d86f HACK: arm64: apple: t8112-j473: Mark ps_atc1_common as always on
-  e4bd0f15 arm64: dts: apple: t60xx: j[34]1[46]: Add dp-altmode hacks
-  449d9961 HACK: arm64: dts: apple: t60xx: j[34]1[46]: Mark ps_atc1_common as always on
-  352b8830 arm64: dts: apple: t60xx: j[34]75: Add dp-altmode hacks
-  30a5013c HACK: arm64: dts: apple: t60xx: j[34]75: Mark ps_atc1_common as always on
-  e3e35907 arm64: dts: apple: t6020-j474s: Add dp-altmode hacks
+  9b65351d usb: typec: tipd: Track data_status changes for CD321x
+  d02d57a6 usb: typec: tipd: HACK: Use drm oob hotplug event
+  8b222e1e arm64: dts: apple: t8103: Add dp-altmode dts hacks
+  ebbd5c7f HACK: arm64: dts: apple: t8103: Mark ps_atc1_common as always on
+  f216a6e7 arm64: dts: apple: t8112: Add dp-altmode dts hacks
+  1069f56d HACK: arm64: dts: apple: t8112: Mark ps_atc1_common as always on
+  c2bd5218 arm64: dts: apple: t60xx: j[34]1[46]: Add dp-altmode hacks
+  681a8a38 HACK: arm64: dts: apple: t60xx: j[34]1[46]: Mark ps_atc1_common as always on
+  43f070b6 arm64: dts: apple: t60xx: j[34]75: Add dp-altmode hacks
+  d3d85a8e HACK: arm64: dts: apple: t60xx: j[34]75: Mark ps_atc1_common as always on
+  b8810ad6 arm64: dts: apple: t6020-j474s: Add dp-altmode hacks
 
 This exists so distributions that build the release branch, such as Asahi
 ALARM's linux-asahi, can get USB-C DisplayPort output without switching
 their kernel source to a different branch.
 
-The first commit in that list is not USB-C work. It is an arm64 config
-fixup that sits on fairydust but not on the release tag, and it comes
-along because this is a plain range diff rather than a curated selection.
-It touches arch/arm64/configs/asahi.config only.
+The base is the release TAG rather than the release BRANCH. The two are
+not interchangeable: the asahi branch trails fairydust by whole stable
+releases at times, and a range taken from the branch then carries every
+unrelated change in between. When this was regenerated, asahi was on
+7.1.9 and fairydust on 7.1.12, and asahi..fairydust was 851 files where
+the real delta is 16.
 
 Upstream marks several of these commits HACK, and the fairydust branch is
 explicitly experimental. In particular the ps_atc1_common power domain is
@@ -37,7 +36,7 @@ forced always-on, which has battery implications on a laptop. Only one
 USB-C port drives a display.
 
 Not authored here. Provenance:
-https://github.com/AsahiLinux/linux/compare/asahi-7.1.5-2...fairydust
+https://github.com/AsahiLinux/linux/compare/asahi-7.1.12-1...fairydust
 ---
 diff --git a/arch/arm64/boot/dts/apple/t6001-j375c.dts b/arch/arm64/boot/dts/apple/t6001-j375c.dts
 index f3f98f03800908..844bee0c4fdf39 100644
@@ -66,7 +65,7 @@ index 5cf30cd162b679..1eedbfecfc38fe 100644
  #include "t600x-j375.dtsi"
  
 diff --git a/arch/arm64/boot/dts/apple/t600x-j314-j316.dtsi b/arch/arm64/boot/dts/apple/t600x-j314-j316.dtsi
-index 5f8f5dd48b92fc..216d74e908edba 100644
+index ec6d9e2bec86c3..2284cb70ec5d4d 100644
 --- a/arch/arm64/boot/dts/apple/t600x-j314-j316.dtsi
 +++ b/arch/arm64/boot/dts/apple/t600x-j314-j316.dtsi
 @@ -9,6 +9,8 @@
@@ -148,9 +147,9 @@ index 5f8f5dd48b92fc..216d74e908edba 100644
 +};
 +#endif
 +
- /* Virtual regulator representing the shared shutdown GPIO */
- / {
- 	speaker_sdz: fixed-regulator-sn012776-sdz {
+ &i2c1 {
+ 	status = "okay";
+ 
 diff --git a/arch/arm64/boot/dts/apple/t600x-j375.dtsi b/arch/arm64/boot/dts/apple/t600x-j375.dtsi
 index ce339c0855bc98..03b335d0cc53b2 100644
 --- a/arch/arm64/boot/dts/apple/t600x-j375.dtsi
@@ -385,7 +384,7 @@ index 67a57fc507df92..bf92d3e2c7753e 100644
  &dwc3_0 {
  	ports {
 diff --git a/arch/arm64/boot/dts/apple/t8112-j413.dts b/arch/arm64/boot/dts/apple/t8112-j413.dts
-index a9119ac584aa6f..5780992fa0d881 100644
+index 5ae973bc79fef4..82f54d603167f5 100644
 --- a/arch/arm64/boot/dts/apple/t8112-j413.dts
 +++ b/arch/arm64/boot/dts/apple/t8112-j413.dts
 @@ -9,6 +9,8 @@
@@ -398,7 +397,7 @@ index a9119ac584aa6f..5780992fa0d881 100644
  #include "t8112-jxxx.dtsi"
  #include <dt-bindings/leds/common.h>
 diff --git a/arch/arm64/boot/dts/apple/t8112-j415.dts b/arch/arm64/boot/dts/apple/t8112-j415.dts
-index 9add9c531f68a0..3551e41f60034c 100644
+index 20a64ecc122d87..c9f0d1a879452e 100644
 --- a/arch/arm64/boot/dts/apple/t8112-j415.dts
 +++ b/arch/arm64/boot/dts/apple/t8112-j415.dts
 @@ -9,6 +9,8 @@
@@ -411,7 +410,7 @@ index 9add9c531f68a0..3551e41f60034c 100644
  #include "t8112-jxxx.dtsi"
  #include <dt-bindings/leds/common.h>
 diff --git a/arch/arm64/boot/dts/apple/t8112-j473.dts b/arch/arm64/boot/dts/apple/t8112-j473.dts
-index 4fc96779806ea3..dea9ef1eb7340a 100644
+index 4fc96779806ea3..cb94c7faa03263 100644
 --- a/arch/arm64/boot/dts/apple/t8112-j473.dts
 +++ b/arch/arm64/boot/dts/apple/t8112-j473.dts
 @@ -9,6 +9,8 @@
@@ -423,10 +422,21 @@ index 4fc96779806ea3..dea9ef1eb7340a 100644
  #include "t8112.dtsi"
  #include "t8112-jxxx.dtsi"
  
-@@ -66,6 +68,51 @@
+@@ -22,7 +24,6 @@
+ 		/delete-property/ dcp;
+ 		dcpext = &dcpext;
+ 		ethernet0 = &ethernet0;
+-		sio = &sio;
+ 		wifi0 = &wifi0;
+ 	};
+ };
+@@ -66,15 +67,51 @@
  	apple,dptx-phy = <5>;
  };
  
+-/* remove once m1n1 enables sio nodes after setup */
+-&sio {
+-        status = "okay";
 +#ifdef ENABLE_DCPEXT_TYPEC
 +/ {
 +	aliases {
@@ -454,29 +464,30 @@ index 4fc96779806ea3..dea9ef1eb7340a 100644
 +	mux-controls = <&atcphy1_xbar 0>;
 +	mux-control-names = "dp-xbar";
 +	mux-index = <0>;
-+};
-+
+ };
+ 
+-&dpaudio1 {
 +&dcpext {
 +	/delete-property/ mux-controls;
 +	/delete-property/ mux-control-names;
 +	/delete-property/ mux-index;
 +};
 +
++&dpaudio0 {
+ 	status = "okay";
+ };
+ 
 +&typec1 {
 +	/* hacks */
 +	displayport = <&dcp>;
 +};
-+
-+&ps_atc1_common {
-+	apple,always-on; /* Needs to stay on for DP-alt suspend/resume */
-+};
 +#endif
 +
- /* remove once m1n1 enables sio nodes after setup */
- &sio {
-         status = "okay";
+ /*
+  * Keep the power-domains used for the HDMI port on.
+  */
 diff --git a/arch/arm64/boot/dts/apple/t8112-j493.dts b/arch/arm64/boot/dts/apple/t8112-j493.dts
-index ba237db8f95030..8ec34e61f48432 100644
+index fd3953fbb2fa0b..ce64fd1f77f881 100644
 --- a/arch/arm64/boot/dts/apple/t8112-j493.dts
 +++ b/arch/arm64/boot/dts/apple/t8112-j493.dts
 @@ -9,6 +9,8 @@
@@ -489,10 +500,18 @@ index ba237db8f95030..8ec34e61f48432 100644
  #include "t8112-jxxx.dtsi"
  #include <dt-bindings/leds/common.h>
 diff --git a/arch/arm64/boot/dts/apple/t8112-jxxx.dtsi b/arch/arm64/boot/dts/apple/t8112-jxxx.dtsi
-index fb957f785d82c5..62fa3bc8f99ff0 100644
+index fb957f785d82c5..7976360ebf1281 100644
 --- a/arch/arm64/boot/dts/apple/t8112-jxxx.dtsi
 +++ b/arch/arm64/boot/dts/apple/t8112-jxxx.dtsi
-@@ -96,6 +96,11 @@
+@@ -18,6 +18,7 @@
+ 		disp0_piodma = &disp0_piodma;
+ 		serial0 = &serial0;
+ 		serial2 = &serial2;
++		sio = &sio;
+ 	};
+ 
+ 	chosen {
+@@ -96,6 +97,11 @@
  			power-role = "dual";
  			data-role = "dual";
  
@@ -504,7 +523,7 @@ index fb957f785d82c5..62fa3bc8f99ff0 100644
  			ports {
  				#address-cells = <1>;
  				#size-cells = <0>;
-@@ -116,6 +121,51 @@
+@@ -116,6 +122,56 @@
  	};
  };
  
@@ -544,6 +563,11 @@ index fb957f785d82c5..62fa3bc8f99ff0 100644
 +	mux-index = <2>;
 +};
 +
++/* remove once m1n1 enables sio nodes after setup */
++&sio {
++        status = "okay";
++};
++
 +&dpaudio1 {
 +	status = "okay";
 +};
@@ -556,21 +580,8 @@ index fb957f785d82c5..62fa3bc8f99ff0 100644
  /* USB controllers */
  &dwc3_0 {
  	ports {
-diff --git a/arch/arm64/configs/asahi.config b/arch/arm64/configs/asahi.config
-index b7ff1bbad24dcb..4aa7f499997e73 100644
---- a/arch/arm64/configs/asahi.config
-+++ b/arch/arm64/configs/asahi.config
-@@ -21,7 +21,7 @@ CONFIG_SPMI_APPLE=m
- CONFIG_PINCTRL_APPLE_GPIO=m
- CONFIG_GPIO_MACSMC=m
- CONFIG_POWER_RESET_MACSMC=m
--CONFIG_CHARGER_MACSMC=m
-+CONFIG_MACSMC_POWER=m
- CONFIG_SENSORS_MACSMC_HWMON=m
- CONFIG_APPLE_WATCHDOG=m
- CONFIG_VIDEO_APPLE_AVD=m
 diff --git a/drivers/usb/typec/tipd/core.c b/drivers/usb/typec/tipd/core.c
-index d0b769333bd998..abc41773285592 100644
+index 7433887eece72c..5c61b7370d0d81 100644
 --- a/drivers/usb/typec/tipd/core.c
 +++ b/drivers/usb/typec/tipd/core.c
 @@ -6,6 +6,8 @@
@@ -582,24 +593,7 @@ index d0b769333bd998..abc41773285592 100644
  #include <linux/i2c.h>
  #include <linux/acpi.h>
  #include <linux/gpio/consumer.h>
-@@ -194,6 +196,7 @@ struct cd321x_status {
- 	u32 pwr_status;
- 	u32 data_status;
- 	u32 status_changed;
-+	u32 data_status_changed;
- 	struct usb_pd_identity partner_identity;
- 	struct tps6598x_dp_sid_status_reg dp_sid_status;
- 	struct tps6598x_intel_vid_status_reg intel_vid_status;
-@@ -216,6 +219,8 @@ struct cd321x {
- 	struct cd321x_status update_status;
- 	struct delayed_work update_work;
- 	struct usb_pd_identity cur_partner_identity;
-+
-+	struct fwnode_handle *connector_fwnode;
- };
- 
- static enum power_supply_property tps6598x_psy_props[] = {
-@@ -745,6 +750,7 @@ static void cd321x_update_work(struct work_struct *work)
+@@ -643,6 +645,7 @@ static void cd321x_update_work(struct work_struct *work)
  
  	st = cd321x->update_status;
  	cd321x->update_status.status_changed = 0;
@@ -607,7 +601,7 @@ index d0b769333bd998..abc41773285592 100644
  
  	bool old_connected = !!tps->partner;
  	bool new_connected = st.status & TPS_STATUS_PLUG_PRESENT;
-@@ -753,6 +759,9 @@ static void cd321x_update_work(struct work_struct *work)
+@@ -651,6 +654,9 @@ static void cd321x_update_work(struct work_struct *work)
  	bool usb_connection = st.data_status &
  			      (TPS_DATA_STATUS_USB2_CONNECTION | TPS_DATA_STATUS_USB3_CONNECTION);
  
@@ -617,7 +611,7 @@ index d0b769333bd998..abc41773285592 100644
  	enum usb_role old_role = usb_role_switch_get_role(tps->role_sw);
  	enum usb_role new_role = USB_ROLE_NONE;
  	enum typec_pwr_opmode pwr_opmode = TYPEC_PWR_MODE_USB;
-@@ -781,6 +790,10 @@ static void cd321x_update_work(struct work_struct *work)
+@@ -679,6 +685,10 @@ static void cd321x_update_work(struct work_struct *work)
  	if (old_role != USB_ROLE_NONE && (new_role != old_role || was_disconnected))
  		usb_role_switch_set_role(tps->role_sw, USB_ROLE_NONE);
  
@@ -628,7 +622,7 @@ index d0b769333bd998..abc41773285592 100644
  	/* Process partner disconnection or change */
  	if (!new_connected || partner_changed) {
  		if (!IS_ERR(tps->partner))
-@@ -837,12 +850,16 @@ static void cd321x_update_work(struct work_struct *work)
+@@ -735,12 +745,16 @@ static void cd321x_update_work(struct work_struct *work)
  	/* Launch the USB role switch */
  	usb_role_switch_set_role(tps->role_sw, new_role);
  
@@ -645,7 +639,7 @@ index d0b769333bd998..abc41773285592 100644
  
  	cd321x->update_status.status = cd321x->tps.status;
  	cd321x->update_status.pwr_status = cd321x->tps.pwr_status;
-@@ -1270,6 +1287,7 @@ static int
+@@ -1169,6 +1183,7 @@ static int
  cd321x_register_port(struct tps6598x *tps, struct fwnode_handle *fwnode)
  {
  	struct cd321x *cd321x = container_of(tps, struct cd321x, tps);
@@ -653,7 +647,7 @@ index d0b769333bd998..abc41773285592 100644
  	int ret;
  
  	INIT_DELAYED_WORK(&cd321x->update_work, cd321x_update_work);
-@@ -1288,6 +1306,11 @@ cd321x_register_port(struct tps6598x *tps, struct fwnode_handle *fwnode)
+@@ -1187,6 +1202,11 @@ cd321x_register_port(struct tps6598x *tps, struct fwnode_handle *fwnode)
  		goto err_unregister_altmodes;
  	}
  
@@ -665,3 +659,24 @@ index d0b769333bd998..abc41773285592 100644
  	cd321x->state.alt = NULL;
  	cd321x->state.mode = TYPEC_STATE_SAFE;
  	cd321x->state.data = NULL;
+diff --git a/drivers/usb/typec/tipd/tps6598x.h b/drivers/usb/typec/tipd/tps6598x.h
+index ab60aeb0c274c9..16e8dc0b1d207a 100644
+--- a/drivers/usb/typec/tipd/tps6598x.h
++++ b/drivers/usb/typec/tipd/tps6598x.h
+@@ -350,6 +350,7 @@ struct cd321x_status {
+ 	u32 pwr_status;
+ 	u32 data_status;
+ 	u32 status_changed;
++	u32 data_status_changed;
+ 	struct usb_pd_identity partner_identity;
+ 	struct tps6598x_dp_sid_status_reg dp_sid_status;
+ 	struct tps6598x_intel_vid_status_reg intel_vid_status;
+@@ -372,6 +373,8 @@ struct cd321x {
+ 	struct cd321x_status update_status;
+ 	struct delayed_work update_work;
+ 	struct usb_pd_identity cur_partner_identity;
++
++	struct fwnode_handle *connector_fwnode;
+ };
+ 
+ struct sn201202x {

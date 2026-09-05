@@ -1641,6 +1641,26 @@ refresh_fairydust_patch() {
         return
     fi
 
+    # A compare is only a delta while both ends sit on the same release. Once
+    # the PKGBUILD's tag falls behind fairydust by whole stable releases, the
+    # range carries every unrelated change in between and stops being a patch
+    # at all: asahi-7.1.6-1...fairydust was 4398 files and 318k lines when this
+    # was written, where the real delta is 16 files. Offering that as "the
+    # fairydust patch" behind a yes/no prompt would be inviting someone to
+    # agree to something that cannot apply.
+    local files
+    files="$(grep -c '^diff --git' "$tmp" || true)"
+    if [[ "${files:-0}" -gt "${FAIRYDUST_MAX_FILES:-50}" ]]; then
+        warn "The fetched range touches $files files, which is not a branch"
+        warn "delta. $tag is behind fairydust by whole stable releases, so the"
+        warn "compare includes everything released in between."
+        warn "Using the shipped snapshot instead."
+        warn "If that does not apply either, the fix is a newer tag in ALARM's"
+        warn "PKGBUILD, not a bigger diff. FAIRYDUST_MAX_FILES raises the cap."
+        rm -f "$tmp"
+        return
+    fi
+
     # Written to a temp file, not into the package directory, because this runs
     # before the user has agreed to apply it.
     local out
