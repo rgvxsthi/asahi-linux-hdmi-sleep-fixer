@@ -1703,6 +1703,163 @@ refresh_fairydust_patch() {
 # This path therefore skips branch selection, config seeding, m1n1 and GRUB
 # entirely. The PKGBUILD pins its own upstream tag and Arch's packaging handles
 # the install, which is more reliable than anything reimplemented here.
+# --- Which kernel tag does the PKGBUILD in this directory actually build? ---
+#
+# --printsrcinfo expands the PKGBUILD's own variables, so this is the tag
+# makepkg will fetch rather than whatever the version variables look like to a
+# reader. Prints nothing and returns non-zero when it cannot be determined.
+pkgbuild_kernel_tag() {
+    local tag
+    # || true is required: under set -eo pipefail a non-matching grep makes the
+    # whole assignment non-zero, which callers read as a hard failure.
+    tag="$(makepkg --printsrcinfo 2>>"$LOG_FILE" \
+        | grep -oE 'archive/[^[:space:]]+\.tar\.gz' \
+        | head -1 | sed 's|archive/||; s|\.tar\.gz$||' || true)"
+    [[ -n "$tag" ]] || return 1
+    printf '%s' "$tag"
+}
+
+# --- Build a kernel tag other than the one ALARM pins ---
+#
+# ALARM's linux-asahi pins the kernel in two variables at the top of its
+# PKGBUILD, and everything else derives from them:
+#
+#   _rcver=7.1.6
+#   _asahirel=1
+#   _commit_id=asahi-${_rcver}${_rcrel+-rc}${_rcrel}-${_asahirel}
+#   source=(https://github.com/AsahiLinux/linux/archive/${_commit_id}.tar.gz config)
+#
+# ALARM trails upstream by whole point releases at times, so KERNEL_TAG exists
+# for the case where that is the only thing standing between the user and a
+# newer kernel. What makes it viable rather than reckless: ALARM carries no
+# kernel patches of its own in source=(), so a newer tag breaks no patch
+# series; prepare() runs `make olddefconfig`, so the config shipped for the old
+# release adapts instead of failing; and updpkgsums, which this script already
+# runs, regenerates the checksums the tag change invalidates.
+#
+# It is still a combination ALARM does not test. The caller is told so.
+#
+#   KERNEL_TAG=asahi-7.1.12-1   build that tag instead of the pinned one
+apply_kernel_tag() {
+    local tag="${KERNEL_TAG:-}" ver rc rel now
+
+    [[ -n "$tag" ]] || return 0
+    [[ -f PKGBUILD ]] || error "No PKGBUILD here to retarget."
+
+    # asahi-7.1.12-1, or asahi-7.2-rc3-1 for a release candidate.
+    if [[ "$tag" =~ ^asahi-([0-9]+\.[0-9]+(\.[0-9]+)?)(-rc([0-9]+))?-([0-9]+)$ ]]; then
+        ver="${BASH_REMATCH[1]}"
+        rc="${BASH_REMATCH[4]}"
+        rel="${BASH_REMATCH[5]}"
+    else
+        error "KERNEL_TAG='$tag' is not an Asahi kernel tag.
+Expected asahi-<version>-<release>, such as asahi-7.1.12-1, which is what
+https://github.com/AsahiLinux/linux/tags lists."
+    fi
+
+    # Checked before the PKGBUILD is touched: a typo here would otherwise be
+    # discovered by makepkg, an hour of dependency installation later, with the
+    # PKGBUILD already rewritten.
+    # Asked of the tags endpoint rather than of /archive/<ref>.tar.gz, which
+    # resolves branches just as happily: a branch whose name looked like a tag
+    # would pass that check and then be built as a moving target.
+    info "Checking that $tag exists upstream..."
+    local code
+    code="$(curl -sL --connect-timeout 15 --retry 2 -o /dev/null -w '%{http_code}' \
+        "https://api.github.com/repos/AsahiLinux/linux/git/ref/tags/${tag}" || true)"
+    case "$code" in
+        200) ;;
+        404)
+            error "No such tag upstream: $tag
+Check https://github.com/AsahiLinux/linux/tags for the current ones."
+            ;;
+        *)
+            # Rate limiting, DNS, a captive portal, a GitHub outage. Sending
+            # someone to hunt a typo they did not make wastes their evening.
+            error "Could not reach GitHub to check that $tag exists (HTTP ${code:-none}).
+Nothing has been changed. Try again when the network is back."
+            ;;
+    esac
+
+    # The whole tag, not just _rcver. Three variables make the tag up, so
+    # comparing one of them called asahi-7.1.6-2 "the same as" asahi-7.1.6-1,
+    # and a stable tag "the same as" the rc of that version — then returned
+    # without doing anything, having said nothing needed doing.
+    now="$(pkgbuild_kernel_tag || true)"
+    if [[ "$now" == "$tag" ]]; then
+        info "The PKGBUILD already builds $tag, so KERNEL_TAG changes nothing"
+        return 0
+    fi
+
+    echo ""
+    warn "KERNEL_TAG asks for a kernel ALARM does not ship."
+    echo ""
+    echo "    PKGBUILD pins: ${now:-unknown}"
+    echo "    you asked for: $tag"
+    echo ""
+    echo "  ALARM builds and tests the version it pins. Going past it means"
+    echo "  the kernel is newer than the rest of the distribution expects."
+    echo "  The failure that matters is m1n1: it walks the kernel's device"
+    echo "  tree at boot and stops before GRUB if it meets a structure it"
+    echo "  does not understand, which is recoverable only from macOS. The"
+    echo "  version dependency in the PKGBUILD is not what protects you"
+    echo "  there — keeping m1n1 up to date is."
+    echo "  Once ALARM ships this version itself, its package and this build"
+    echo "  carry the same version, so pacman -Syu will not replace yours."
+    echo "  Your existing kernel package stays installed until makepkg"
+    echo "  succeeds, and 'sudo pacman -S linux-asahi' puts the stock one"
+    echo "  back afterwards."
+    if [[ -n "$rc" ]]; then
+        echo ""
+        echo "  This is a release candidate, and pacman sorts ${ver}rc${rc}"
+        echo "  ABOVE the finished $ver, so a later 'pacman -Syu' will not"
+        echo "  replace it. Reinstalling the package is the way off it."
+    fi
+    echo ""
+
+    if ! confirm "Build $tag instead of what ALARM pins?"; then
+        info "Leaving the PKGBUILD on ${now:-the tag it pins}."
+        return 0
+    fi
+
+    # Only the value is replaced, not the rest of the line: `_rcver=7.1.6
+    # _asahirel=1` is legal bash, and a line-swallowing substitution would
+    # delete the second assignment while setting the first.
+    sed -i "s|^_rcver=[^[:space:]]*|_rcver=$ver|; s|^_asahirel=[^[:space:]]*|_asahirel=$rel|" PKGBUILD
+    if [[ -n "$rc" ]]; then
+        sed -i "s|^#*_rcrel=[^[:space:]]*|_rcrel=$rc|" PKGBUILD
+    else
+        # A stable tag has no -rc part, and _rcrel must be UNSET rather than
+        # empty: _commit_id uses ${_rcrel+-rc}, which tests for set, so an
+        # empty _rcrel would build asahi-<ver>-rc-<rel>. Commenting the line
+        # out is what unsets it.
+        sed -i "s|^_rcrel=[^[:space:]]*|#_rcrel=|" PKGBUILD
+    fi
+
+    # Read back rather than trusting the sed.
+    local got
+    got="$(pkgbuild_kernel_tag || true)"
+    if [[ "$got" != "$tag" ]]; then
+        error "Retargeting the PKGBUILD did not take: it still builds '${got:-nothing}'.
+Nothing has been built. See $LOG_FILE for what makepkg said, and restore the
+file with:
+  git -C \"$(dirname "$PWD")\" checkout -- linux-asahi/PKGBUILD"
+    fi
+
+    ok "PKGBUILD now builds $tag"
+    KERNEL_TAG_APPLIED="$tag"
+
+    # Checksums here, not only at the end of the patch step. The tag change
+    # invalidates the ones in the file immediately, and there are exits between
+    # here and there — SKIP_PATCHES=1, and declining every patch — that would
+    # otherwise leave a PKGBUILD naming a new tarball with the old tarball's
+    # sums. Following the script's own "cd ... && makepkg -si" advice would
+    # then fail the integrity check for no visible reason. updpkgsums is
+    # idempotent, so running it again after the patches are staged is fine.
+    info "Refreshing checksums for $tag ..."
+    updpkgsums 2>&1 | tee -a "$LOG_FILE"
+}
+
 alarm_build() {
     local patch_dir pkgdir chosen p name subject audience want wanted staged_src
 
@@ -1740,6 +1897,10 @@ alarm_build() {
     fi
 
     cd "$pkgdir/linux-asahi" || error "linux-asahi not found in $pkgdir"
+
+    # Before the patches are chosen: which tag is being built decides whether
+    # they apply at all.
+    apply_kernel_tag
 
     info "=== Step 3/5: choosing patches ==="
     chosen=()
@@ -1803,6 +1964,11 @@ alarm_build() {
             info "Build the stock package yourself with: cd $pkgdir/linux-asahi && makepkg -si"
             return
         fi
+        [[ -z "${KERNEL_TAG_APPLIED:-}" ]] || error "No patches selected.
+The PKGBUILD is retargeted to $KERNEL_TAG_APPLIED and its checksums match, so
+building that kernel unpatched is a working thing to do — this script just has
+nothing left to add:
+  cd $PWD && makepkg -si"
         error "No patches selected, so this would just build the stock kernel.
 Nothing to do."
     fi
@@ -1843,7 +2009,11 @@ The PKGBUILD layout has probably changed. Add it to source=() by hand and re-run
     offer_notch_arg_alarm
 
     echo ""
-    ok "Done. Reboot and verify with:"
+    if [[ -n "${KERNEL_TAG_APPLIED:-}" ]]; then
+        ok "Done. Built $KERNEL_TAG_APPLIED, which is NOT the kernel ALARM pins."
+    else
+        ok "Done. Reboot and verify with:"
+    fi
     echo "    uname -r"
     echo "    cat /sys/class/drm/card*-HDMI-A-1/status   # before and after a suspend"
     echo ""

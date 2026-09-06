@@ -237,6 +237,7 @@ Most behaviour is environment-overridable:
 | `SKIP_VERSION_LOOKUP` | `0` | Set to `1` to skip the live kernel-version lookup in the branch menu |
 | `FAIRYDUST_REFRESH` | `1` | ALARM only. `0` uses the shipped patch snapshot instead of refetching |
 | `FAIRYDUST_MAX_FILES` | `50` | ALARM only. Above this many files a refetched range is rejected as no longer a delta |
+| `KERNEL_TAG` | *(ALARM's pin)* | ALARM only. Build a different upstream kernel tag, e.g. `asahi-7.1.12-1` |
 | `ALARM_PKGBUILDS_DIR` | `$HOME/PKGBUILDs` | ALARM only. Where to clone `asahi-alarm/PKGBUILDs` |
 | `RUST_LIB_SRC` | *(autodetected)* | Path to the Rust library source, if autodetection picks wrong |
 
@@ -398,6 +399,61 @@ PKGBUILD and leaves it parsing correctly. **`makepkg`, mkinitcpio and ALARM's
 boot wiring are untested** — this was developed on Fedora. The script says so
 when it runs. Your existing kernel package stays installed unless `makepkg -si`
 succeeds. Reports welcome.
+
+### Building a newer kernel than ALARM pins
+
+ALARM trails upstream. Its `linux-asahi` pinned `asahi-7.1.6-1` while the
+`fairydust` branch was on 7.1.12, and the ALARM path builds what the PKGBUILD
+pins — so by default this script does not move you off ALARM's version, it just
+patches it.
+
+`KERNEL_TAG=asahi-7.1.12-1` retargets the PKGBUILD at that tag first. What
+makes that viable rather than reckless is the shape of ALARM's PKGBUILD:
+
+- `source=()` is the upstream tarball plus a local `config`. **No kernel
+  patches of ALARM's own**, so a newer tag breaks no patch series.
+- `prepare()` runs `make olddefconfig`, so the config shipped for the older
+  release adapts to the newer tree instead of failing on unknown symbols.
+- `updpkgsums`, which this script already runs, regenerates the checksums the
+  tag change invalidates.
+
+The tag is checked against GitHub's **tags** endpoint before the file is
+touched — not against `/archive/<ref>.tar.gz`, which happily resolves branches
+too, so a branch whose name looked like a tag would otherwise have been built
+as a moving target. After the rewrite the result is read back through
+`makepkg --printsrcinfo`, which expands the PKGBUILD's own variables, so what
+is reported is the tag makepkg will actually fetch. If it does not match, the
+script stops and nothing is built.
+
+It is still a combination ALARM does not test, and the script says so and asks
+before proceeding.
+
+What the research actually found, for a stable point bump like 7.1.6 → 7.1.12:
+
+- **The config is fine.** `arch/arm64/configs/asahi.config` is byte-identical
+  between the two tags, and running `make olddefconfig` with ALARM's `config`
+  against both trees differs by six lines, none of them Asahi hardware. GPU,
+  DPTX, SMC and 16k pages all stay on.
+- **Rust is not a gate.** Neither tag ships a `rust-toolchain.toml`, and
+  `scripts/min-tool-version.sh` is identical across them.
+- **Nothing else is version-locked.** `mesa`, `asahi-scripts`, `uboot-asahi`
+  and `speakersafetyd` declare no dependency on `linux-asahi`, and the GPU UAPI
+  header is byte-identical between the tags.
+- **m1n1 is the real risk, but not through its version number.** The `m1n1>=`
+  dependency is a formality — ALARM's m1n1 is already at upstream's newest tag.
+  The way m1n1 breaks a boot is by meeting a device-tree structure it does not
+  understand and stopping before GRUB, which is recoverable only from macOS.
+  The DT delta between these two tags touches nothing m1n1 parses, but a
+  further jump is exactly where that would change. Keep m1n1 current.
+- **pacman upgrades cleanly** (`7.1.12.asahi1 > 7.1.6.asahi1`), with one catch:
+  once ALARM ships the same version at the same `pkgrel`, its package and your
+  build compare equal, so `pacman -Syu` will not replace yours.
+
+A release-candidate tag has a further trap, which the prompt spells out: pacman
+sorts `7.2rc1.asahi1` *above* `7.2.asahi1`, so `pacman -Syu` will never replace
+an rc build with the finished release.
+
+`sudo pacman -S linux-asahi` puts the stock kernel back, whichever tag you built.
 
 ### The notch argument on ALARM
 
