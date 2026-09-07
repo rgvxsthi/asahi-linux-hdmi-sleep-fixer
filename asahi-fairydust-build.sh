@@ -58,6 +58,9 @@ LOG_FILE="$HOME/fairydust-build.log"
 # Filled in by offer_notch_arg, read by print_summary.
 NOTCH_ARGS_SET=()
 
+# Filled in by offer_pin_hook, read by print_summary.
+PIN_HOOK_INSTALLED=""
+
 # Prefer the distro Rust toolchain over anything rustup installed.
 #
 # The kernel compiles the Rust core library from source, so rustc and the
@@ -1108,6 +1111,7 @@ update_grub() {
 
     offer_notch_arg
     offer_default_kernel
+    offer_pin_hook
 }
 
 # --- Boot the kernel we just built by default? ---
@@ -1185,6 +1189,216 @@ offer_default_kernel() {
     else
         warn "Asked GRUB to boot $kver by default, but it still reports"
         warn "${now:-nothing}. Pick the kernel from the GRUB menu instead."
+    fi
+}
+
+# --- Keep this kernel the boot default across dnf kernel updates ---
+#
+# dnf makes every kernel it installs the boot default, and it has no idea this
+# one exists: `make install` is not a package, so nothing in the transaction
+# knows there is a kernel here worth keeping. A stock kernel update therefore
+# takes the default away silently, and the machine comes back up without the
+# HDMI fix having changed nothing the owner can see. This offers a
+# kernel-install drop-in that puts the default back afterwards.
+#
+# Only offered when a kernel this repo built is the default already. Pinning a
+# kernel the user has just declined to boot would be answering a question they
+# were asked and said no to.
+#
+#   PIN_HOOK=1   install the hook without asking
+#   PIN_HOOK=0   do not install it, without asking
+PIN_HOOK_PATH="/etc/kernel/install.d/96-fairydust-pin-default.install"
+
+# Written out with the suffix list this build actually used, so a machine built
+# with LOCALVERSION=-something-else pins the right kernel. Everything else is
+# literal: the heredoc is quoted.
+write_pin_hook() {
+    local tmp suffixes
+    tmp="$(mktemp)" || return 1
+
+    # The uninstaller's list, plus whatever LOCALVERSION is set to now. Sorted
+    # and de-duplicated so the common case does not repeat -hdmifix.
+    suffixes="$(printf '%s\n' "$LOCALVERSION" -hdmifix -fairydust -rgvx \
+        | grep -v '^$' | sort -u | paste -sd' ')"
+
+    cat > "$tmp" <<'HOOK'
+#!/usr/bin/bash
+# Installed by asahi-fairydust-build.sh. Safe to delete at any time; nothing
+# else depends on it and removing it only means dnf keeps the boot default.
+#
+# dnf makes every kernel it installs the boot default. The kernel this repo
+# builds is installed with `make install`, so no package owns it and no part
+# of a dnf transaction knows it is there. Without this hook a routine stock
+# kernel update silently takes the default, and the next boot has no HDMI fix.
+#
+# Numbered 96 so it runs after 95-set-boot-entry.install, which is what
+# actually writes saved_entry. Running before it would be overwritten.
+
+COMMAND="$1"
+KERNEL_VERSION="$2"
+
+# Only an install can take the default away.
+[[ "$COMMAND" == "add" ]] || exit 0
+command -v grubby >/dev/null 2>&1 || exit 0
+
+# Sanitised the same way the uninstaller sanitises it: this goes into an ERE,
+# and a suffix carrying regex metacharacters would match far more than it
+# should. '+' is stripped too -- it is legal in a kernel name but means "one
+# or more" in an ERE, so LOCALVERSION=-a+ would otherwise match any kernel
+# name containing an 'a'.
+KERNEL_SUFFIXES="@@SUFFIXES@@"
+KVER_PATTERN="$(printf '%s\n' $KERNEL_SUFFIXES \
+    | sed 's/^-//; s/[^A-Za-z0-9_]//g' \
+    | grep -v '^$' | sort -u | paste -sd'|')"
+[[ -n "$KVER_PATTERN" ]] || exit 0
+
+# rpm is queried inside a live dnf transaction, which holds the database lock.
+# A read normally goes through, but a hook that hangs here would hang the
+# kernel install itself, so the query is bounded. An answer that does not
+# arrive is treated as "owned": that makes the kernel invisible to this hook
+# and the worst case becomes doing nothing, which is the safe direction to be
+# wrong in.
+rpm_owns() {
+    local p rc
+    for p in "/boot/vmlinuz-$1" "/usr/lib/modules/$1"; do
+        [[ -e "$p" ]] || continue
+        timeout 10 rpm -qf "$p" >/dev/null 2>&1
+        rc=$?
+        (( rc == 0 ))   && return 0
+        (( rc >= 124 )) && return 0
+    done
+    return 1
+}
+
+# A name match alone is not enough. Asahi ships 4k and 16k page-size kernels
+# side by side, so a suffix like -16k matches stock names, and matching on the
+# name would have this hook pinning a stock kernel over another stock kernel.
+# Package ownership is the fact that separates them.
+is_ours() {
+    [[ "$1" =~ ($KVER_PATTERN) ]] || return 1
+    rpm_owns "$1" && return 1
+    return 0
+}
+
+# The kernel being installed is one of ours: it is already becoming the
+# default through the normal path, and re-pinning it here would be a no-op at
+# best and a fight with the build script's own prompt at worst.
+is_ours "$KERNEL_VERSION" && exit 0
+
+# Newest by mtime, so a machine carrying two custom kernels pins the one built
+# last. Modules and an initramfs are both required: pinning a kernel missing
+# either hands the machine an unbootable default, which is a far worse outcome
+# than the stock kernel this hook exists to displace.
+pin=""
+newest=0
+for img in /boot/vmlinuz-*; do
+    [[ -e "$img" ]] || continue
+    k="${img#/boot/vmlinuz-}"
+    is_ours "$k" || continue
+    [[ -d "/usr/lib/modules/$k"    ]] || continue
+    [[ -e "/boot/initramfs-$k.img" ]] || continue
+    t="$(stat -c %Y "$img" 2>/dev/null)" || continue
+    if (( t > newest )); then
+        newest="$t"
+        pin="$k"
+    fi
+done
+[[ -n "$pin" ]] || exit 0
+
+now="$(grubby --default-kernel 2>/dev/null)"
+[[ "$now" == "/boot/vmlinuz-$pin" ]] && exit 0
+
+if grubby --set-default="/boot/vmlinuz-$pin" >/dev/null 2>&1; then
+    echo "fairydust: kept $pin as the boot default (installed $KERNEL_VERSION)"
+else
+    echo "fairydust: could not pin $pin as the boot default;" \
+         "$KERNEL_VERSION will boot instead" >&2
+fi
+
+# Never fail the transaction. A kernel install that aborts in a hook is a much
+# worse thing to leave behind than a boot default that needs setting by hand.
+exit 0
+HOOK
+
+    sed -i "s|@@SUFFIXES@@|$suffixes|" "$tmp" || { rm -f "$tmp"; return 1; }
+
+    sudo install -D -m 0755 -o root -g root "$tmp" "$PIN_HOOK_PATH" || {
+        rm -f "$tmp"
+        return 1
+    }
+    rm -f "$tmp"
+    return 0
+}
+
+offer_pin_hook() {
+    local current
+
+    command -v grubby         >/dev/null 2>&1 || return 0
+    command -v kernel-install >/dev/null 2>&1 || return 0
+
+    # Only worth offering when one of ours is the default. If the user kept a
+    # stock kernel as the default there is nothing for dnf to take away.
+    current="$(sudo grubby --default-kernel 2>/dev/null || true)"
+    current="${current##*/vmlinuz-}"
+    [[ -n "$current" && "$current" != /* ]] || return 0
+    [[ "$current" =~ (${LOCALVERSION#-}|hdmifix|fairydust|rgvx) ]] || return 0
+
+    if [[ -e "$PIN_HOOK_PATH" ]]; then
+        info "The boot-default hook is already installed ($PIN_HOOK_PATH)"
+        PIN_HOOK_INSTALLED="$PIN_HOOK_PATH"
+        return 0
+    fi
+
+    echo ""
+    echo "  GRUB boots $current by default now."
+    echo ""
+    echo "  dnf does not know that kernel exists -- it was installed with"
+    echo "  'make install', so no package owns it. The next stock kernel"
+    echo "  update will take the boot default for itself, and that kernel"
+    echo "  has no HDMI fix in it."
+    echo ""
+    echo "  A hook can put the default back after each stock kernel install:"
+    echo "    $PIN_HOOK_PATH"
+    echo ""
+    echo "  It only ever selects a kernel that has modules and an initramfs,"
+    echo "  it never removes anything, and deleting the file undoes it."
+    echo ""
+
+    case "${PIN_HOOK:-}" in
+        1) info "PIN_HOOK=1, installing the boot-default hook" ;;
+        0) info "PIN_HOOK=0, not installing the boot-default hook"; return 0 ;;
+        *)
+            # ASSUME_YES answers this one as no, for the same reason it does
+            # not change the boot default: an unattended run is exactly the
+            # case where nobody is watching to undo a boot-time surprise.
+            if [[ "${ASSUME_YES:-0}" == "1" ]]; then
+                info "Not installing the boot-default hook: ASSUME_YES leaves it alone."
+                info "Pass PIN_HOOK=1 to install it."
+                return 0
+            fi
+            if ! confirm "Install the hook that keeps $current the boot default?"; then
+                info "No hook installed. A stock kernel update will take the default;"
+                info "put it back with: sudo grubby --set-default=/boot/vmlinuz-$current"
+                return 0
+            fi
+            ;;
+    esac
+
+    if ! write_pin_hook; then
+        warn "Could not write $PIN_HOOK_PATH. The boot default is unchanged,"
+        warn "but a stock kernel update will take it. Put it back with:"
+        warn "  sudo grubby --set-default=/boot/vmlinuz-$current"
+        return 0
+    fi
+
+    # Read it back. install(1) reporting success is not the same as a file
+    # that kernel-install will actually run, and a hook that is not executable
+    # fails silently at exactly the moment it is needed.
+    if sudo test -x "$PIN_HOOK_PATH"; then
+        PIN_HOOK_INSTALLED="$PIN_HOOK_PATH"
+        ok "Boot default will be restored after each stock kernel update"
+    else
+        warn "Wrote $PIN_HOOK_PATH but it is not executable. It will not run."
     fi
 }
 
@@ -1534,6 +1748,12 @@ print_summary() {
         echo "  Notch argument added to the kernel command line:"
         printf '    - %s\n' "${NOTCH_ARGS_SET[@]}"
         echo "  (undo with: sudo grubby --remove-args=<argument> --update-kernel=ALL)"
+        echo ""
+    fi
+    if [[ -n "$PIN_HOOK_INSTALLED" ]]; then
+        echo "  Boot default is now kept across stock kernel updates by:"
+        echo "    $PIN_HOOK_INSTALLED"
+        echo "  (undo with: sudo rm $PIN_HOOK_INSTALLED)"
         echo ""
     fi
     echo "  NEXT STEPS:"

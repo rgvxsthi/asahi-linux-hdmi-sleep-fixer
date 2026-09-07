@@ -891,6 +891,16 @@ if [[ "$FULL_REMOVAL" == "1" ]]; then
         ok "Removed typec module autoload config"
     fi
 
+    # The kernel-install drop-in that puts the boot default back after a stock
+    # kernel update. With the last custom kernel gone it has nothing left to
+    # pin, and it already exits without acting when it finds nothing -- but
+    # leaving root-owned automation behind after an uninstall is its own
+    # problem, so it goes with everything else.
+    if [[ -f /etc/kernel/install.d/96-fairydust-pin-default.install ]]; then
+        sudo rm -f /etc/kernel/install.d/96-fairydust-pin-default.install
+        ok "Removed the boot-default kernel-install hook"
+    fi
+
     # The three blocks below clean up files this script's own builder never
     # creates. They come from the upstream fork's older script, which did
     # install a display hotplug rule and an autostart entry. Anyone who ran
